@@ -40,20 +40,29 @@ stages {
                 echo "=== Gitleaks Secrets Detection ==="
                 echo "Scanning full Git history..."
 
+                echo "=== Check Git Directory ==="
+
                 docker run --rm \
-                    -e GIT_DISCOVERY_ACROSS_FILESYSTEM=1 \
-                    -e GIT_DIR=/repo/.git \
                     -v "$PWD:/repo" \
                     -w /repo \
+                    --entrypoint sh \
                     zricethezav/gitleaks:latest \
-                    detect \
-                    --source=/repo \
-                    --redact \
-                    --report-format sarif \
-                    --report-path=/repo/gitleaks.sarif
+                    -c '
+                        echo "--- /repo ---"
+                        ls -la /repo
 
-                echo "=== Gitleaks Report ==="
-                ls -lh gitleaks.sarif
+                        echo "--- /repo/.git ---"
+                        ls -la /repo/.git
+
+                        echo "--- Git status ---"
+                        git -C /repo status
+
+                        echo "--- Git root ---"
+                        git -C /repo rev-parse --show-toplevel
+
+                        echo "--- Commit count ---"
+                        git -C /repo rev-list --count HEAD
+                    '
             '''
         }
 
@@ -68,7 +77,6 @@ stages {
         }
 
         }
-
 
     stage('Install') {
         steps {
