@@ -1,0 +1,2 @@
+password = "supersecretpassword123456789"
+token = "ghp_1234567890abcdefghijklmnopqrstuvwxyz123456"

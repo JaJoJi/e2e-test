@@ -1,0 +1,5 @@
+[[rules]]
+id = "lab06-test-secret"
+description = "Lab 06 test secret"
+regex = '''LAB06_SECRET_[A-Za-z0-9]{20,}'''
+secretGroup = 0
