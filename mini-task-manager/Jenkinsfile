@@ -72,9 +72,7 @@ stages {
 
                     echo "=== Unit Test + Coverage ==="
 
-                    npm test -- \
-                        --coverage \
-                        --reporters=jest-junit
+                    npm test -- --coverage
 
                     echo "=== Unit Test Reports ==="
                     ls -lh test-results/
