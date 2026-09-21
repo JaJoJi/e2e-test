@@ -1,11 +1,10 @@
 const express = require('express');
 const path = require('path');
+const { createTaskStore } = require('./taskStore');
 
 const app = express();
 const PORT = parseInt(process.env.PORT, 10) || 3000;
-
-let nextId = 1;
-const tasks = [];
+const store = createTaskStore();
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -15,58 +14,56 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/tasks', (req, res) => {
-  res.status(200).json(tasks);
+  res.status(200).json(store.listTasks());
 });
 
 app.post('/api/tasks', (req, res) => {
-  const title = (req.body && req.body.title || '').toString().trim();
-  if (!title) {
-    return res.status(400).json({ error: 'Title is required' });
+  const body = req.body || {};
+  const result = store.createTask(body.title);
+  if (result.error) {
+    return res.status(400).json(result);
   }
-  const task = { id: nextId++, title, completed: false };
-  tasks.push(task);
-  return res.status(201).json(task);
+  return res.status(201).json(result.task);
 });
 
 app.patch('/api/tasks/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const task = tasks.find((t) => t.id === id);
-  if (!task) {
-    return res.status(404).json({ error: 'Task not found' });
+  const body = req.body || {};
+  const result = store.updateTask(id, body);
+  if (result.error) {
+    return res.status(404).json(result);
   }
-  if (typeof req.body.completed === 'boolean') {
-    task.completed = req.body.completed;
-  }
-  if (typeof req.body.title === 'string' && req.body.title.trim()) {
-    task.title = req.body.title.trim();
-  }
-  return res.status(200).json(task);
+  return res.status(200).json(result.task);
 });
 
 app.delete('/api/tasks/:id', (req, res) => {
   const id = parseInt(req.params.id, 10);
-  const idx = tasks.findIndex((t) => t.id === id);
-  if (idx === -1) {
-    return res.status(404).json({ error: 'Task not found' });
+  const result = store.deleteTask(id);
+  if (result.error) {
+    return res.status(404).json(result);
   }
-  const [deleted] = tasks.splice(idx, 1);
-  return res.status(200).json(deleted);
+  return res.status(200).json(result.task);
 });
 
 app.use((req, res) => {
   res.status(404).json({ error: 'Not Found' });
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`Mini Task Manager listening on port ${PORT}`);
-});
+// Only start listening when run directly (e.g. `node src/server.js` or the
+// Playwright `webServer` command). When the module is required by tests
+// (Jest/supertest), we export the app without binding a port.
+if (require.main === module) {
+  const server = app.listen(PORT, () => {
+    console.log(`Mini Task Manager listening on port ${PORT}`);
+  });
 
-const shutdown = (signal) => {
-  console.log(`Received ${signal}, shutting down...`);
-  server.close(() => process.exit(0));
-};
+  const shutdown = (signal) => {
+    console.log(`Received ${signal}, shutting down...`);
+    server.close(() => process.exit(0));
+  };
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+}
 
 module.exports = app;
