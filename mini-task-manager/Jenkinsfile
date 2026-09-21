@@ -97,6 +97,114 @@ stages {
 
         }
 
+    stage('SAST — ESLint Security') {
+        steps {
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
+
+                    echo "=== Install dependencies for SAST ==="
+                    npm ci --no-audit --no-fund
+
+                    echo "=== ESLint Security Scan ==="
+
+                    npx eslint \
+                        --plugin security \
+                        --format @microsoft/eslint-formatter-sarif \
+                        --output-file eslint-security.sarif \
+                        src/
+
+                    echo "=== SARIF Report ==="
+                    ls -lh eslint-security.sarif
+
+                    RESULTS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('./eslint-security.sarif','utf8')).runs[0].results.length)")
+                    echo "ESLint Security findings: $RESULTS"
+                '''
+            }
+        }
+
+        post {
+            always {
+                dir('mini-task-manager') {
+                    archiveArtifacts(
+                        artifacts: 'eslint-security.sarif',
+                        fingerprint: true,
+                        allowEmptyArchive: true
+                    )
+                }
+            }
+        }
+    }
+
+    stage('SAST — Semgrep') {
+        steps {
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
+
+                    echo "=== Semgrep SAST (p/owasp-top-ten + p/nodejs) ==="
+
+                    CONTAINER="semgrep-${BUILD_NUMBER}"
+
+                    echo "=== Create Semgrep container ==="
+                    docker create \
+                        --name "$CONTAINER" \
+                        semgrep/semgrep:latest \
+                        semgrep \
+                            --config p/owasp-top-ten \
+                            --config p/nodejs \
+                            --sarif \
+                            --output /repo/semgrep.sarif \
+                            --no-git-ignore \
+                            /repo/src
+
+                    echo "=== Copy workspace into container ==="
+                    docker cp . "$CONTAINER:/repo"
+
+                    echo "=== Run Semgrep ==="
+                    set +e
+                    docker start -a "$CONTAINER"
+                    SEMGREP_EXIT=$?
+                    set -e
+
+                    echo "Semgrep exit code: $SEMGREP_EXIT"
+
+                    echo "=== Copy report out ==="
+                    docker cp "$CONTAINER:/repo/semgrep.sarif" ./semgrep.sarif 2>/dev/null || true
+
+                    echo "=== Cleanup ==="
+                    docker rm "$CONTAINER" >/dev/null 2>&1 || true
+
+                    if [ "$SEMGREP_EXIT" -ne 0 ]; then
+                        echo "Semgrep scan failed (exit $SEMGREP_EXIT)"
+                        exit "$SEMGREP_EXIT"
+                    fi
+
+                    echo "=== Report ==="
+                    ls -lh semgrep.sarif
+
+                    RESULTS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('./semgrep.sarif','utf8')).runs[0].results.length)")
+                    echo "Semgrep findings: $RESULTS"
+
+                    echo "=== NOTE: WARNING-level findings do not fail this stage. ==="
+                    echo "===       Fail/warn threshold is handled by future policy work. ==="
+                '''
+            }
+        }
+
+        post {
+            always {
+                dir('mini-task-manager') {
+                    archiveArtifacts(
+                        artifacts: 'semgrep.sarif',
+                        fingerprint: true,
+                        allowEmptyArchive: true
+                    )
+                }
+            }
+        }
+    }
+
     stage('Install') {
         steps {
             dir('mini-task-manager') {

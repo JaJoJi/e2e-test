@@ -18,9 +18,8 @@ ignores: [
 js.configs.recommended,
 
 {
-files: ['**/*.js'],
+  files: ['**/*.js'],
 
-```
 languageOptions: {
   ecmaVersion: 2023,
   sourceType: 'commonjs',
@@ -54,7 +53,6 @@ rules: {
   'security/detect-unsafe-regex': 'warn',
   'security/detect-child-process': 'warn',
 },
-```
 
 },
 ];
