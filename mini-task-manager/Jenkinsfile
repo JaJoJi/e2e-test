@@ -674,10 +674,15 @@ const sarif = JSON.parse(fs.readFileSync('trivy.sarif', 'utf8'));
 const run = (sarif.runs && sarif.runs[0]) || {};
 const rules = ((run.tool && run.tool.driver && run.tool.driver.rules) || []);
 const results = run.results || [];
+const SEVS = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
 const sevOf = (ruleId) => {
     const r = rules.find(x => x.id === ruleId) || {};
     const p = r.properties || {};
-    return (p.severity || p['security-severity'] || '').toUpperCase();
+    const tags = (p.tags || []).map(x => String(x).toUpperCase());
+    const t = tags.find(x => SEVS.includes(x));
+    if (t) return t;
+    if (p.severity) return String(p.severity).toUpperCase();
+    return '';
 };
 let high = 0, crit = 0, other = 0;
 for (const res of results) {
