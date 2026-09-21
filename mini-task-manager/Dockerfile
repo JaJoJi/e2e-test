@@ -1,4 +1,7 @@
-FROM node:20-alpine
+# Lab 07: node:22-alpine — actively maintained base with fixed OpenSSL libs
+# (node:20-alpine upstream digest is stale and its frozen Alpine repos do not
+# carry the libcrypto3/libssl3 fixes). App requires node >= 20 (package.json).
+FROM node:22-alpine
 
 ENV NODE_ENV=production \
     PORT=3000
