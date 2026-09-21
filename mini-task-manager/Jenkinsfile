@@ -32,6 +32,71 @@ stages {
         }
     }
 
+    stage('Secrets Detection — Gitleaks') {
+        steps {
+        sh '''
+        set -eu
+
+                echo "=== Gitleaks Secrets Detection ==="
+                echo "Scanning full Git history..."
+
+                CONTAINER="gitleaks-${BUILD_NUMBER}"
+
+                echo "=== Create Gitleaks Container ==="
+
+                docker create \
+                    --name "$CONTAINER" \
+                    zricethezav/gitleaks:latest \
+                    detect \
+                    --source=/repo \
+                    --redact \
+                    --report-format sarif \
+                    --report-path=/repo/gitleaks.sarif
+
+                echo "=== Copy Jenkins Workspace into Container ==="
+
+                docker cp . "$CONTAINER:/repo"
+
+                echo "=== Run Gitleaks ==="
+
+                set +e
+                docker start -a "$CONTAINER"
+                GITLEAKS_EXIT=$?
+                set -e
+
+                echo "=== Copy Gitleaks Report ==="
+
+                docker cp \
+                    "$CONTAINER:/repo/gitleaks.sarif" \
+                    ./gitleaks.sarif
+
+                echo "=== Gitleaks Report ==="
+                ls -lh gitleaks.sarif
+
+                echo "=== Cleanup Gitleaks Container ==="
+                docker rm "$CONTAINER" >/dev/null
+
+                if [ "$GITLEAKS_EXIT" -ne 0 ]; then
+                    echo "Gitleaks detected secrets or failed."
+                    exit "$GITLEAKS_EXIT"
+                fi
+
+                echo "Gitleaks passed."
+            '''
+        }
+
+        post {
+            always {
+                archiveArtifacts(
+                    artifacts: 'gitleaks.sarif',
+                    fingerprint: true,
+                    allowEmptyArchive: true
+                )
+            }
+        }
+
+        }
+
     stage('Install') {
         steps {
             dir('mini-task-manager') {
