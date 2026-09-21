@@ -593,8 +593,9 @@ NODE
                     fi
 
                     # 2. Build the image from mini-task-manager/Dockerfile.
-                    #    Any failure here fails the pipeline (no '|| true').
-                    docker build -t "${IMAGE}" -f Dockerfile .
+                    #    --pull ensures a fresh base image so OS fixes apply.
+                    #    Any failure here fails the pipeline (no error masking).
+                    docker build --pull -t "${IMAGE}" -f Dockerfile .
 
                     # 3. Tag for the local registry and push.
                     docker tag "${IMAGE}" "${REGISTRY_IMAGE}"

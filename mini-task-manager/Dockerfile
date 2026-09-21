@@ -8,6 +8,14 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev && npm cache clean --force
 
+# Lab 07: remediate Trivy HIGH/CRITICAL findings with real fixes (no suppression).
+# 1. Upgrade Alpine OpenSSL libs (fixes libcrypto3/libssl3 CVEs).
+# 2. Remove the Node-bundled npm/npx: build-time tools whose transitive deps
+#    (tar, cross-spawn, glob, minimatch, ...) carry CVEs. The runtime needs
+#    only `node` (see CMD/HEALTHCHECK and package.json "start").
+RUN apk upgrade --no-cache openssl \
+ && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
+
 COPY src ./src
 
 EXPOSE 3000
