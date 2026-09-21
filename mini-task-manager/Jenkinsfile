@@ -1,7 +1,6 @@
 pipeline {
 agent { label 'linux-build' }
 
-```
 options {
     timestamps()
     disableConcurrentBuilds()
@@ -113,7 +112,4 @@ post {
     failure {
         echo "E2E TEST FAILED"
     }
-}
-```
-
 }
