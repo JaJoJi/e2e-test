@@ -41,6 +41,7 @@ stages {
                 echo "Scanning full Git history..."
 
                 docker run --rm \
+                    -e GIT_DISCOVERY_ACROSS_FILESYSTEM=1 \
                     -v "$PWD:/repo" \
                     zricethezav/gitleaks:latest \
                     detect \
