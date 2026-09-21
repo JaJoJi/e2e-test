@@ -73,6 +73,20 @@ stages {
                         --build \
                         --abort-on-container-exit \
                         --exit-code-from playwright
+
+                    echo "=== Check reports on Jenkins workspace ==="
+
+                    echo "--- e2e/reports ---"
+                    find e2e/reports -maxdepth 3 -type f -print 2>/dev/null || true
+
+                    echo "--- e2e/playwright-report ---"
+                    find e2e/playwright-report -maxdepth 2 -type f -print 2>/dev/null | head -30 || true
+
+                    echo "--- e2e/test-results ---"
+                    find e2e/test-results -maxdepth 3 -type f -print 2>/dev/null | head -30 || true
+
+                    echo "=== Directory listing ==="
+                    ls -la e2e
                 '''
             }
         }
@@ -123,4 +137,5 @@ post {
         echo "E2E TEST FAILED"
     }
 }
+
 }
