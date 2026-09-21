@@ -37,18 +37,24 @@ stages {
         sh '''
         set -eu
 
+        ```
                 echo "=== Gitleaks Secrets Detection ==="
                 echo "Scanning full Git history..."
 
                 docker run --rm \
                     -e GIT_DISCOVERY_ACROSS_FILESYSTEM=1 \
+                    -e GIT_DIR=/repo/.git \
                     -v "$PWD:/repo" \
+                    -w /repo \
                     zricethezav/gitleaks:latest \
                     detect \
                     --source=/repo \
                     --redact \
                     --report-format sarif \
                     --report-path=/repo/gitleaks.sarif
+
+                echo "=== Gitleaks Report ==="
+                ls -lh gitleaks.sarif
             '''
         }
 
@@ -61,8 +67,10 @@ stages {
                 )
             }
         }
+        ```
 
         }
+
 
     stage('Install') {
         steps {
