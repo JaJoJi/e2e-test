@@ -205,6 +205,75 @@ stages {
         }
     }
 
+    stage('SCA — npm audit') {
+        steps {
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
+
+                    echo "=== SCA — npm audit ==="
+
+                    # Run npm audit and ALWAYS capture the JSON, regardless of exit code.
+                    # Fail/warn policy is decided in this stage, not by npm's own exit code.
+                    set +e
+                    npm audit --audit-level=high --json > audit.json 2>audit.stderr
+                    AUDIT_EXIT=$?
+                    set -e
+                    echo "npm audit raw exit code: ${AUDIT_EXIT}"
+
+                    if [ ! -s audit.json ]; then
+                        echo "ERROR: audit.json was not produced"
+                        cat audit.stderr || true
+                        exit 1
+                    fi
+
+                    echo "=== Vulnerability Counts ==="
+                    node -e "
+                        const fs = require('fs');
+                        const a = JSON.parse(fs.readFileSync('audit.json','utf8'));
+                        const m = (a.metadata && a.metadata.vulnerabilities) || {};
+                        const c  = m.critical  || 0;
+                        const h  = m.high      || 0;
+                        const mo = m.moderate  || 0;
+                        const l  = m.low       || 0;
+                        const i  = m.info      || 0;
+                        const t  = m.total     || 0;
+                        console.log('critical  = ' + c);
+                        console.log('high      = ' + h);
+                        console.log('moderate  = ' + mo);
+                        console.log('low       = ' + l);
+                        console.log('info      = ' + i);
+                        console.log('total     = ' + t);
+                        if (c > 0) {
+                            console.error('Blocking: ' + c + ' critical vulnerabilities found');
+                            process.exit(10);
+                        }
+                        if (h > 0) {
+                            console.warn('WARNING: ' + h + ' high vulnerabilities found');
+                        } else {
+                            console.log('No high vulnerabilities');
+                        }
+                        if (mo > 0) console.warn('INFO: ' + mo + ' moderate vulnerabilities');
+                        if (l  > 0) console.warn('INFO: ' + l  + ' low vulnerabilities');
+                        if (i  > 0) console.log('INFO: ' + i  + ' informational items');
+                        console.log('SCA passed: 0 critical vulnerabilities');
+                '''
+            }
+        }
+
+        post {
+            always {
+                dir('mini-task-manager') {
+                    archiveArtifacts(
+                        artifacts: 'audit.json',
+                        fingerprint: true,
+                        allowEmptyArchive: true
+                    )
+                }
+            }
+        }
+    }
+
     stage('Install') {
         steps {
             dir('mini-task-manager') {
