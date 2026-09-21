@@ -87,10 +87,9 @@ stages {
                         allowEmptyResults: true
                     )
 
-                    cobertura(
-                        coberturaReportFile: 'coverage/cobertura-coverage.xml',
-                        onlyStable: false,
-                        failNoReports: false
+                    recordCoverage(
+                        tools: [[parser: 'COBERTURA', pattern: 'coverage/cobertura-coverage.xml']],
+                        sourceCodeRetention: 'EVERY_BUILD'
                     )
 
                     archiveArtifacts(
