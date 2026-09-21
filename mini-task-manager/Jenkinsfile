@@ -612,6 +612,110 @@ NODE
         }
     }
 
+    stage('Container Scan — Trivy') {
+        steps {
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
+
+                    echo "=== Container Scan — Trivy ==="
+
+                    IMAGE="localhost:5000/taskflow-api:${SHORT_SHA}"
+                    TRIVY_IMAGE="aquasec/trivy:0.74.0"
+
+                    echo "Scan image: ${IMAGE}"
+                    echo "Trivy:      ${TRIVY_IMAGE}"
+
+                    # Same 7-char SHA as the Build Image stage.
+                    echo "${SHORT_SHA}" | grep -Eq '^[0-9a-f]{7}$'
+
+                    # 1. Human-readable table scan for the console log.
+                    #    Exit code 0: informational only, never blocks.
+                    echo "=== Trivy table scan (HIGH,CRITICAL) ==="
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v trivy-cache:/root/.cache \
+                        "${TRIVY_IMAGE}" \
+                        image --scanners vuln --severity HIGH,CRITICAL \
+                            --no-progress --exit-code 0 "${IMAGE}" > trivy-table.log 2>&1
+                    cat trivy-table.log
+                    if grep -E '^Total:' trivy-table.log; then
+                        echo "(table summary above)"
+                    else
+                        echo "(no Total summary line in table output)"
+                    fi
+
+                    # 2. SARIF scan that blocks on HIGH/CRITICAL (exit 1).
+                    #    The report is copied out of the container BEFORE the
+                    #    stage exits, so the post-always archive always has the
+                    #    file even when the scan fails. Errors are never masked.
+                    echo "=== Trivy SARIF scan (HIGH,CRITICAL, exit-code 1) ==="
+                    SARIF_CTR="trivy-sarif-${BUILD_NUMBER:-$$}"
+                    docker create --name "${SARIF_CTR}" \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v trivy-cache:/root/.cache \
+                        "${TRIVY_IMAGE}" \
+                        image --scanners vuln --severity HIGH,CRITICAL \
+                            --no-progress --format sarif -o /tmp/trivy.sarif \
+                            --exit-code 1 "${IMAGE}" > /dev/null
+                    set +e
+                    docker start -a "${SARIF_CTR}" > trivy-scan.log 2>&1
+                    TRIVY_EXIT=$?
+                    set -e
+                    cat trivy-scan.log
+                    docker cp "${SARIF_CTR}:/tmp/trivy.sarif" ./trivy.sarif
+                    docker rm "${SARIF_CTR}" > /dev/null
+
+                    # 3. Summarize HIGH/CRITICAL counts from the SARIF report.
+                    echo "=== Trivy summary (from trivy.sarif) ==="
+                    node <<'NODE'
+const fs = require('fs');
+const sarif = JSON.parse(fs.readFileSync('trivy.sarif', 'utf8'));
+const run = (sarif.runs && sarif.runs[0]) || {};
+const rules = ((run.tool && run.tool.driver && run.tool.driver.rules) || []);
+const results = run.results || [];
+const sevOf = (ruleId) => {
+    const r = rules.find(x => x.id === ruleId) || {};
+    const p = r.properties || {};
+    return (p.severity || p['security-severity'] || '').toUpperCase();
+};
+let high = 0, crit = 0, other = 0;
+for (const res of results) {
+    const s = sevOf(res.ruleId);
+    if (s === 'CRITICAL') crit++;
+    else if (s === 'HIGH') high++;
+    else other++;
+}
+console.log('HIGH     = ' + high);
+console.log('CRITICAL = ' + crit);
+console.log('other    = ' + other);
+console.log('total    = ' + results.length);
+NODE
+
+                    # 4. Block the pipeline when Trivy found HIGH/CRITICAL.
+                    echo "Trivy exit code: ${TRIVY_EXIT}"
+                    if [ "${TRIVY_EXIT}" -ne 0 ]; then
+                        echo "Blocking: Trivy found HIGH/CRITICAL vulnerabilities."
+                        exit "${TRIVY_EXIT}"
+                    fi
+                    echo "Trivy passed: no HIGH/CRITICAL vulnerabilities."
+                '''
+            }
+        }
+
+        post {
+            always {
+                dir('mini-task-manager') {
+                    archiveArtifacts(
+                        artifacts: 'trivy.sarif',
+                        fingerprint: true,
+                        allowEmptyArchive: false
+                    )
+                }
+            }
+        }
+    }
+
     stage('Install') {
         steps {
             dir('mini-task-manager') {
