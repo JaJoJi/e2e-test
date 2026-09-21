@@ -1,9 +1,12 @@
 pipeline {
-agent { label 'linux-build' }
+agent {
+label 'linux-build'
+}
 
 options {
     timestamps()
     disableConcurrentBuilds()
+    skipDefaultCheckout(true)
     buildDiscarder(logRotator(numToKeepStr: '20'))
     timeout(time: 15, unit: 'MINUTES')
 }
@@ -14,6 +17,15 @@ environment {
 }
 
 stages {
+
+    stage('Start') {
+        steps {
+            echo '=== Start Mini Task Manager Pipeline ==='
+            echo "Branch: ${env.BRANCH_NAME}"
+            echo "Build:  ${env.BUILD_NUMBER}"
+        }
+    }
+
     stage('Checkout') {
         steps {
             checkout scm
@@ -22,39 +34,112 @@ stages {
 
     stage('Install') {
         steps {
-            sh '''
-                set -eu
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
 
-                echo "=== Environment ==="
-                echo "Node:    $(node --version 2>/dev/null || echo 'missing')"
-                echo "npm:     $(npm --version 2>/dev/null || echo 'missing')"
-                echo "Docker:  $(docker --version 2>/dev/null || echo 'missing')"
-                echo "Compose: $(docker compose version 2>/dev/null || echo 'missing')"
+                    echo "=== Environment ==="
+                    node --version
+                    npm --version
+                    docker --version
+                    docker compose version
 
-                echo "=== Workspace ==="
-                pwd
-                ls -la
-            '''
+                    echo "=== Install Dependencies ==="
+                    npm ci
+                '''
+            }
         }
     }
 
-    stage('Start/Test Application') {
+    stage('Lint') {
         steps {
             dir('mini-task-manager') {
                 sh '''
                     set -eu
 
-                    echo "=== Project Directory ==="
-                    pwd
-                    ls -la
+                    echo "=== ESLint ==="
+                    npm run lint
+                '''
+            }
+        }
+    }
 
-                    echo "=== Clean previous Compose resources ==="
+    stage('Unit Test') {
+        steps {
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
+
+                    echo "=== Unit Test + Coverage ==="
+
+                    npm test -- \
+                        --coverage \
+                        --reporters=jest-junit
+                '''
+            }
+        }
+
+        post {
+            always {
+                dir('mini-task-manager') {
+                    junit(
+                        testResults: 'test-results/junit-unit.xml',
+                        allowEmptyResults: true
+                    )
+
+                    cobertura(
+                        coberturaReportFile: 'coverage/cobertura-coverage.xml',
+                        onlyStable: false,
+                        failNoReports: false
+                    )
+
+                    archiveArtifacts(
+                        artifacts: 'coverage/**',
+                        fingerprint: true,
+                        allowEmptyArchive: true
+                    )
+                }
+            }
+        }
+    }
+
+    stage('SonarQube Analysis') {
+        steps {
+            dir('mini-task-manager') {
+                script {
+                    def scannerHome = tool 'SonarScanner'
+
+                    withSonarQubeEnv('SonarQube') {
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    stage('Quality Gate') {
+        steps {
+            timeout(time: 5, unit: 'MINUTES') {
+                waitForQualityGate abortPipeline: true
+            }
+        }
+    }
+
+    stage('Deploy — Staging') {
+        steps {
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
+
+                    echo "=== Deploy — Staging ==="
+
                     docker compose down -v --remove-orphans || true
 
-                    echo "=== Start web application ==="
                     docker compose up -d --build --wait web
 
-                    echo "=== Compose status ==="
+                    echo "=== Staging Status ==="
                     docker compose ps
                 '''
             }
@@ -89,20 +174,57 @@ stages {
                     docker cp mtm-playwright:/app/e2e/test-results/. \
                         e2e/test-results/
 
-                    echo "=== Verify JUnit report ==="
-                    ls -lh e2e/reports/
-                    test -f e2e/reports/junit-e2e.xml
+                    echo "=== Verify Reports ==="
 
-                    echo "=== Verify Playwright HTML report ==="
-                    ls -lh e2e/playwright-report/ | head
+                    test -f e2e/reports/junit-e2e.xml
                     test -f e2e/playwright-report/index.html
 
-                    echo "=== Verify test results ==="
-                    find e2e/test-results -maxdepth 3 -type f -print | head -30
-
-                    echo "=== Reports successfully copied to Jenkins workspace ==="
+                    ls -lh e2e/reports/
+                    ls -lh e2e/playwright-report/ | head
                 '''
             }
+        }
+
+        post {
+            always {
+                dir('mini-task-manager') {
+                    junit(
+                        testResults: 'e2e/reports/junit-e2e.xml',
+                        allowEmptyResults: true
+                    )
+
+                    archiveArtifacts(
+                        artifacts: 'e2e/playwright-report/**',
+                        fingerprint: true,
+                        allowEmptyArchive: true
+                    )
+
+                    archiveArtifacts(
+                        artifacts: 'e2e/reports/junit-e2e.xml',
+                        fingerprint: true,
+                        allowEmptyArchive: true
+                    )
+
+                    archiveArtifacts(
+                        artifacts: 'e2e/test-results/**',
+                        fingerprint: true,
+                        allowEmptyArchive: true
+                    )
+                }
+            }
+        }
+    }
+
+    stage('Deploy — Production') {
+        steps {
+            echo '=== Deploy — Production ==='
+            echo 'Production deployment simulated for Lab 05.'
+        }
+    }
+
+    stage('End') {
+        steps {
+            echo '=== End Mini Task Manager Pipeline ==='
         }
     }
 }
@@ -110,32 +232,7 @@ stages {
 post {
     always {
         dir('mini-task-manager') {
-            echo "=== Publish E2E reports ==="
-
-            junit(
-                testResults: 'e2e/reports/junit-e2e.xml',
-                allowEmptyResults: false
-            )
-
-            archiveArtifacts(
-                artifacts: 'e2e/playwright-report/**',
-                fingerprint: true,
-                allowEmptyArchive: false
-            )
-
-            archiveArtifacts(
-                artifacts: 'e2e/reports/junit-e2e.xml',
-                fingerprint: true,
-                allowEmptyArchive: false
-            )
-
-            archiveArtifacts(
-                artifacts: 'e2e/test-results/**',
-                fingerprint: true,
-                allowEmptyArchive: false
-            )
-
-            echo "=== Cleanup Docker Compose ==="
+            echo '=== Cleanup Docker Compose ==='
 
             sh '''
                 docker compose down -v --remove-orphans || true
@@ -144,11 +241,11 @@ post {
     }
 
     success {
-        echo "E2E TEST PASSED"
+        echo 'PIPELINE PASSED'
     }
 
     failure {
-        echo "E2E TEST FAILED"
+        echo 'PIPELINE FAILED'
     }
 }
 
