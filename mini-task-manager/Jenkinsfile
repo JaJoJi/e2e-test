@@ -457,6 +457,107 @@ NODE
         }
     }
 
+    stage('Policy Gate — OPA') {
+        steps {
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
+
+                    echo "=== Policy Gate — OPA ==="
+
+                    AUDIT="audit.json"
+                    POLICY_DIR="policy"
+                    POLICY_FILE="policy/security.rego"
+                    OPA_IMAGE="openpolicyagent/opa:latest"
+
+                    # 1. Preconditions: both the SCA output and the Rego policy must exist.
+                    if [ ! -s "$AUDIT" ]; then
+                        echo "ERROR: $AUDIT not found. SCA stage must run first."
+                        exit 1
+                    fi
+                    if [ ! -s "$POLICY_FILE" ]; then
+                        echo "ERROR: $POLICY_FILE not found."
+                        exit 1
+                    fi
+
+                    # 2. Echo vulnerability summary so the log shows what OPA is judging.
+                    node -e "
+                        const fs = require('fs');
+                        const a = JSON.parse(fs.readFileSync('$AUDIT','utf8'));
+                        const v = (a.metadata && a.metadata.vulnerabilities) || {};
+                        console.log('vulnerability counts (from $AUDIT):');
+                        console.log('  critical = ' + (v.critical || 0));
+                        console.log('  high     = ' + (v.high     || 0));
+                        console.log('  moderate = ' + (v.moderate || 0));
+                        console.log('  low      = ' + (v.low      || 0));
+                        console.log('  info     = ' + (v.info     || 0));
+                    "
+
+                    # 3. Run OPA on the audit.json input via docker create/cp/start/cp/rm.
+                    #    Two queries: `allow` (boolean decision) and `deny` (reason msgs).
+                    echo "=== OPA eval (data.security.allow) ==="
+                    ALLOW_CTR="opa-allow-${BUILD_NUMBER:-$$}"
+                    docker create --name "$ALLOW_CTR" \
+                        "$OPA_IMAGE" \
+                        eval -d /policy -i /audit.json "data.security.allow" > /dev/null
+                    docker cp "$AUDIT"     "$ALLOW_CTR:/audit.json"
+                    docker cp "$POLICY_DIR" "$ALLOW_CTR:/policy"
+                    docker start -a "$ALLOW_CTR" > /tmp/opa-allow.json 2>&1
+                    docker rm "$ALLOW_CTR" > /dev/null 2>&1 || true
+                    unset ALLOW_CTR
+
+                    echo "=== OPA eval (data.security.deny) ==="
+                    DENY_CTR="opa-deny-${BUILD_NUMBER:-$$}"
+                    docker create --name "$DENY_CTR" \
+                        "$OPA_IMAGE" \
+                        eval -d /policy -i /audit.json "data.security.deny" > /dev/null
+                    docker cp "$AUDIT"     "$DENY_CTR:/audit.json"
+                    docker cp "$POLICY_DIR" "$DENY_CTR:/policy"
+                    docker start -a "$DENY_CTR" > /tmp/opa-deny.json 2>&1
+                    docker rm "$DENY_CTR" > /dev/null 2>&1 || true
+                    unset DENY_CTR
+
+                    # 4. Parse the OPA JSON output and decide.
+                    ALLOW=$(node -e "
+                        const j = JSON.parse(require('fs').readFileSync('/tmp/opa-allow.json','utf8'));
+                        process.stdout.write(String(j.result[0].expressions[0].value));
+                    ")
+                    DENY_RAW=$(node -e "
+                        const j = JSON.parse(require('fs').readFileSync('/tmp/opa-deny.json','utf8'));
+                        const v = j.result[0].expressions[0].value;
+                        process.stdout.write(JSON.stringify(v));
+                    ")
+
+                    echo ""
+                    echo "=== OPA Policy Decision ==="
+                    if [ "$ALLOW" = "true" ]; then
+                        echo "OPA Policy Decision: ALLOW"
+                        echo "Policy Gate passed: 0 critical vulnerabilities"
+                    else
+                        echo "OPA Policy Decision: DENY"
+                        echo "Reason(s):"
+                        # Print each deny message on its own line.
+                        echo "$DENY_RAW" | node -e "
+                            let raw = '';
+                            process.stdin.on('data', d => raw += d);
+                            process.stdin.on('end', () => {
+                                const v = JSON.parse(raw);
+                                if (Array.isArray(v)) {
+                                    for (const m of v) console.log('  - ' + m);
+                                } else {
+                                    console.log('  - DENY');
+                                }
+                            });
+                        "
+                        echo ""
+                        echo "Policy Gate FAILED."
+                        exit 1
+                    fi
+                '''
+            }
+        }
+    }
+
     stage('Install') {
         steps {
             dir('mini-task-manager') {
