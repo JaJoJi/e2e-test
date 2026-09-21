@@ -37,7 +37,6 @@ stages {
         sh '''
         set -eu
 
-        ```
                 echo "=== Gitleaks Secrets Detection ==="
                 echo "Scanning full Git history..."
 
@@ -67,7 +66,6 @@ stages {
                 )
             }
         }
-        ```
 
         }
 
