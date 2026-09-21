@@ -1,0 +1,20 @@
+FROM mcr.microsoft.com/playwright:v1.48.0-jammy
+
+WORKDIR /app
+
+COPY package.json package-lock.json* ./
+RUN npm ci && npm cache clean --force
+
+COPY playwright.config.js ./
+COPY e2e ./e2e
+
+ENV BASE_URL=http://web:3000 \
+    SKIP_WEBSERVER=1 \
+    CI=1 \
+    NODE_ENV=test
+
+# Run as root so bind-mounted report directories are always writable,
+# regardless of the host user / Jenkins agent UID.
+USER root
+
+CMD ["npx", "--no-install", "playwright", "test"]

@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mini Task Manager</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1 data-testid="app-title">Mini Task Manager</h1>
+
+      <form id="task-form" class="task-form" data-testid="task-form">
+        <input
+          type="text"
+          id="task-input"
+          name="task-input"
+          data-testid="task-input"
+          placeholder="What needs to be done?"
+          autocomplete="off"
+          required
+        />
+        <button type="submit" data-testid="add-task" class="primary">
+          Add Task
+        </button>
+      </form>
+
+      <p
+        id="empty-state"
+        data-testid="empty-state"
+        class="empty-state"
+        hidden
+      >
+        No tasks yet. Add one above!
+      </p>
+
+      <ul id="task-list" data-testid="task-list" class="task-list"></ul>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

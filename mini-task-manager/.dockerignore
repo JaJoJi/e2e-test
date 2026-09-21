@@ -1,0 +1,12 @@
+node_modules
+npm-debug.log
+.git
+.gitignore
+.dockerignore
+e2e/reports
+e2e/playwright-report
+e2e/test-results
+README.md
+Jenkinsfile
+Dockerfile.playwright
+.dockerignore

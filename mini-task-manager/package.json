@@ -1,0 +1,21 @@
+{
+  "name": "mini-task-manager",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Mini Task Manager - Lab 05 Playwright E2E + Jenkins demo",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test:e2e": "playwright test",
+    "test:e2e:report": "playwright test --reporter=list,junit,html"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.48.0"
+  }
+}

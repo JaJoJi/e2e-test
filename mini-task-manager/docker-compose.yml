@@ -1,0 +1,48 @@
+name: mini-task-manager
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mini-task-manager-web:latest
+    container_name: mtm-web
+    restart: "no"
+    expose:
+      - "3000"
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - require('http').get('http://127.0.0.1:3000/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+
+  playwright:
+    build:
+      context: .
+      dockerfile: Dockerfile.playwright
+    image: mini-task-manager-playwright:latest
+    container_name: mtm-playwright
+    restart: "no"
+    user: "0:0"
+    environment:
+      - BASE_URL=http://web:3000
+      - SKIP_WEBSERVER=1
+      - CI=1
+      - NODE_ENV=test
+    depends_on:
+      web:
+        condition: service_healthy
+    volumes:
+      - ./e2e/reports:/app/e2e/reports
+      - ./e2e/playwright-report:/app/e2e/playwright-report
+      - ./e2e/test-results:/app/e2e/test-results
