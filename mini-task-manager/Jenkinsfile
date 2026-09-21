@@ -288,6 +288,175 @@ NODE
         }
     }
 
+    stage('SBOM — Syft + Cosign') {
+        steps {
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
+
+                    echo "=== SBOM — Syft + Cosign ==="
+
+                    SBOM="taskflow-api.cdx.json"
+                    SBOM_IMAGE="mtm-sbom-scan:tmp"
+                    KEYDIR=".sbom-keys"
+                    COSIGN_IMAGE="gcr.io/projectsigstore/cosign:v2.4.1"
+                    SYFT_IMAGE="anchore/syft:latest"
+
+                    # Per-build random password; do NOT log it.
+                    export COSIGN_PASSWORD
+                    COSIGN_PASSWORD="lab06-$(date +%s)-$(head -c 16 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9')"
+                    echo "Generated per-build COSIGN_PASSWORD (length=${#COSIGN_PASSWORD}), not logged"
+
+                    # Safety net: wipe keydir on any exit (success, failure, interrupt).
+                    cleanup() {
+                        rm -rf "$KEYDIR" 2>/dev/null || true
+                        unset COSIGN_PASSWORD || true
+                    }
+                    trap cleanup EXIT
+
+                    # ------------------------------------------------------------------
+                    # 1. Build the SBOM scan image (production-only deps, matches
+                    #    the same image the Deploy — Staging stage will run later).
+                    # ------------------------------------------------------------------
+                    echo "=== Build SBOM scan image ==="
+                    docker build -t "$SBOM_IMAGE" -f Dockerfile .
+
+                    # ------------------------------------------------------------------
+                    # 2. Generate CycloneDX SBOM by scanning the built image.
+                    #    We scan the IMAGE rather than the source directory because
+                    #    Syft's `dir:` source mode currently produces 0 components
+                    #    for npm-only projects; scanning the built image yields the
+                    #    real production dependency tree (660 components, 279 npm).
+                    # ------------------------------------------------------------------
+                    echo "=== Generate SBOM (CycloneDX) ==="
+                    SBOM_CTR="sbom-gen-${BUILD_NUMBER:-$$}"
+                    docker create --name "$SBOM_CTR" \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        "$SYFT_IMAGE" \
+                        scan "docker:$SBOM_IMAGE" -o cyclonedx-json > /dev/null
+                    docker start -a "$SBOM_CTR" > "$SBOM" 2>/dev/null
+                    SBOM_EXIT=$?
+                    docker rm "$SBOM_CTR" > /dev/null 2>&1 || true
+                    unset SBOM_CTR
+                    if [ "$SBOM_EXIT" -ne 0 ] || [ ! -s "$SBOM" ]; then
+                        echo "ERROR: Syft scan failed (exit $SBOM_EXIT)"
+                        exit 1
+                    fi
+
+                    # Validate SBOM and report component count.
+                    node -e "
+                        const j = JSON.parse(require('fs').readFileSync('$SBOM','utf8'));
+                        const n = (j.components||[]).length;
+                        if (j.bomFormat !== 'CycloneDX') {
+                            console.error('ERROR: SBOM is not CycloneDX (got: ' + j.bomFormat + ')');
+                            process.exit(1);
+                        }
+                        console.log('SBOM format      : ' + j.bomFormat);
+                        console.log('SBOM specVersion : ' + j.specVersion);
+                        console.log('SBOM components  : ' + n);
+                    "
+
+                    # ------------------------------------------------------------------
+                    # 3. Generate ephemeral Cosign keypair.  The private key lives
+                    #    only inside the container's overlay; we copy it to a
+                    #    workspace-local $KEYDIR for the next steps, then `trap`
+                    #    deletes $KEYDIR.  We never archive $KEYDIR.
+                    # ------------------------------------------------------------------
+                    echo "=== Generate ephemeral Cosign keypair ==="
+                    mkdir -p "$KEYDIR"
+                    KG_CTR="cosign-keygen-${BUILD_NUMBER:-$$}"
+                    docker create --name "$KG_CTR" \
+                        -u 0:0 \
+                        -e "COSIGN_PASSWORD=$COSIGN_PASSWORD" \
+                        "$COSIGN_IMAGE" \
+                        generate-key-pair --output-key-prefix /home/nonroot/cosign > /dev/null
+                    docker start -a "$KG_CTR" > /dev/null 2>&1
+                    docker cp "$KG_CTR:/home/nonroot/cosign.pub" "$KEYDIR/cosign.pub" || { echo "ERROR: cp cosign.pub failed"; exit 1; }
+                    docker cp "$KG_CTR:/home/nonroot/cosign.key" "$KEYDIR/cosign.key" || { echo "ERROR: cp cosign.key failed"; exit 1; }
+                    docker rm "$KG_CTR" > /dev/null 2>&1 || true
+                    unset KG_CTR
+                    if [ ! -s "$KEYDIR/cosign.key" ] || [ ! -s "$KEYDIR/cosign.pub" ]; then
+                        echo "ERROR: keypair was not produced"
+                        exit 1
+                    fi
+                    # Promote public key out of KEYDIR so it survives trap cleanup.
+                    cp "$KEYDIR/cosign.pub" ./cosign.pub
+
+                    # ------------------------------------------------------------------
+                    # 4. Sign the SBOM with the ephemeral private key.
+                    # ------------------------------------------------------------------
+                    echo "=== Sign SBOM ==="
+                    SG_CTR="cosign-sign-${BUILD_NUMBER:-$$}"
+                    docker create --name "$SG_CTR" \
+                        -u 0:0 \
+                        -e "COSIGN_PASSWORD=$COSIGN_PASSWORD" \
+                        "$COSIGN_IMAGE" \
+                        sign-blob \
+                            --key /home/nonroot/cosign.key \
+                            --output-signature /home/nonroot/${SBOM}.sig \
+                            --yes \
+                            /home/nonroot/$SBOM > /dev/null
+                    docker cp "$SBOM"                "$SG_CTR:/home/nonroot/$SBOM"
+                    docker cp "$KEYDIR/cosign.key"   "$SG_CTR:/home/nonroot/cosign.key"
+                    docker start -a "$SG_CTR" > /dev/null 2>&1
+                    docker cp "$SG_CTR:/home/nonroot/${SBOM}.sig" "./${SBOM}.sig" || { echo "ERROR: cp signature failed"; exit 1; }
+                    docker rm "$SG_CTR" > /dev/null 2>&1 || true
+                    unset SG_CTR
+                    if [ ! -s "${SBOM}.sig" ]; then
+                        echo "ERROR: SBOM signature was not produced"
+                        exit 1
+                    fi
+
+                    # ------------------------------------------------------------------
+                    # 5. Verify the signature using ONLY the public key (which is
+                    #    archived as a build artifact).  Exit code 0 = verified.
+                    # ------------------------------------------------------------------
+                    echo "=== Verify SBOM signature ==="
+                    VR_CTR="cosign-verify-${BUILD_NUMBER:-$$}"
+                    docker create --name "$VR_CTR" \
+                        -u 0:0 \
+                        "$COSIGN_IMAGE" \
+                        verify-blob \
+                            --key /home/nonroot/cosign.pub \
+                            --signature /home/nonroot/${SBOM}.sig \
+                            /home/nonroot/$SBOM > /dev/null
+                    docker cp "$SBOM"           "$VR_CTR:/home/nonroot/$SBOM"
+                    docker cp "${SBOM}.sig"      "$VR_CTR:/home/nonroot/${SBOM}.sig"
+                    docker cp cosign.pub         "$VR_CTR:/home/nonroot/cosign.pub"
+                    docker start -a "$VR_CTR"
+                    VERIFY_EXIT=$?
+                    docker rm "$VR_CTR" > /dev/null 2>&1 || true
+                    unset VR_CTR
+                    if [ "$VERIFY_EXIT" -ne 0 ]; then
+                        echo "ERROR: Cosign signature verification FAILED (exit $VERIFY_EXIT)"
+                        exit 1
+                    fi
+                    echo "=== SBOM + signature VERIFIED ==="
+
+                    echo "=== Final SBOM component count ==="
+                    node -e "console.log((JSON.parse(require('fs').readFileSync('$SBOM','utf8')).components||[]).length + ' components')"
+                '''
+            }
+        }
+
+        post {
+            always {
+                dir('mini-task-manager') {
+                    // Safety net: ensure the ephemeral private key dir is gone
+                    // even if the stage skipped cleanup (e.g. JVM abort).
+                    sh 'rm -rf .sbom-keys || true'
+
+                    // Archive ONLY the public material.  Never archive cosign.key.
+                    archiveArtifacts(
+                        artifacts: 'taskflow-api.cdx.json,taskflow-api.cdx.json.sig,cosign.pub',
+                        fingerprint: true,
+                        allowEmptyArchive: false
+                    )
+                }
+            }
+        }
+    }
+
     stage('Install') {
         steps {
             dir('mini-task-manager') {
