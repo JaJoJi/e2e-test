@@ -42,7 +42,3 @@ services:
     depends_on:
       web:
         condition: service_healthy
-    volumes:
-      - ./e2e/reports:/app/e2e/reports
-      - ./e2e/playwright-report:/app/e2e/playwright-report
-      - ./e2e/test-results:/app/e2e/test-results
