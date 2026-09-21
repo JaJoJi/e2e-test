@@ -3,6 +3,7 @@ agent {
 label 'linux-build'
 }
 
+```
 options {
     timestamps()
     disableConcurrentBuilds()
@@ -75,6 +76,10 @@ stages {
                     npm test -- \
                         --coverage \
                         --reporters=jest-junit
+
+                    echo "=== Unit Test Reports ==="
+                    ls -lh test-results/
+                    ls -lh coverage/
                 '''
             }
         }
@@ -88,7 +93,10 @@ stages {
                     )
 
                     recordCoverage(
-                        tools: [[parser: 'COBERTURA', pattern: 'coverage/cobertura-coverage.xml']],
+                        tools: [[
+                            parser: 'COBERTURA',
+                            pattern: 'coverage/cobertura-coverage.xml'
+                        ]],
                         sourceCodeRetention: 'EVERY_BUILD'
                     )
 
@@ -215,7 +223,13 @@ stages {
     }
 
     stage('Deploy — Production') {
+        when {
+            branch 'main'
+        }
+
         steps {
+            input message: 'Deploy to production?'
+
             echo '=== Deploy — Production ==='
             echo 'Production deployment simulated for Lab 05.'
         }
@@ -247,5 +261,6 @@ post {
         echo 'PIPELINE FAILED'
     }
 }
+```
 
 }
