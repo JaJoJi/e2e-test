@@ -40,29 +40,48 @@ stages {
                 echo "=== Gitleaks Secrets Detection ==="
                 echo "Scanning full Git history..."
 
-                echo "=== Check Git Directory ==="
+                CONTAINER="gitleaks-${BUILD_NUMBER}"
 
-                docker run --rm \
-                    -v "$PWD:/repo" \
-                    -w /repo \
-                    --entrypoint sh \
+                echo "=== Create Gitleaks Container ==="
+
+                docker create \
+                    --name "$CONTAINER" \
                     zricethezav/gitleaks:latest \
-                    -c '
-                        echo "--- /repo ---"
-                        ls -la /repo
+                    detect \
+                    --source=/repo \
+                    --redact \
+                    --report-format sarif \
+                    --report-path=/repo/gitleaks.sarif
 
-                        echo "--- /repo/.git ---"
-                        ls -la /repo/.git
+                echo "=== Copy Jenkins Workspace into Container ==="
 
-                        echo "--- Git status ---"
-                        git -C /repo status
+                docker cp . "$CONTAINER:/repo"
 
-                        echo "--- Git root ---"
-                        git -C /repo rev-parse --show-toplevel
+                echo "=== Run Gitleaks ==="
 
-                        echo "--- Commit count ---"
-                        git -C /repo rev-list --count HEAD
-                    '
+                set +e
+                docker start -a "$CONTAINER"
+                GITLEAKS_EXIT=$?
+                set -e
+
+                echo "=== Copy Gitleaks Report ==="
+
+                docker cp \
+                    "$CONTAINER:/repo/gitleaks.sarif" \
+                    ./gitleaks.sarif
+
+                echo "=== Gitleaks Report ==="
+                ls -lh gitleaks.sarif
+
+                echo "=== Cleanup Gitleaks Container ==="
+                docker rm "$CONTAINER" >/dev/null
+
+                if [ "$GITLEAKS_EXIT" -ne 0 ]; then
+                    echo "Gitleaks detected secrets or failed."
+                    exit "$GITLEAKS_EXIT"
+                fi
+
+                echo "Gitleaks passed."
             '''
         }
 
