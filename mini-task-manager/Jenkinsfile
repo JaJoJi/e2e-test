@@ -1,73 +1,119 @@
 pipeline {
-  agent { label 'linux-build' }
+agent { label 'linux-build' }
 
-  options {
+```
+options {
     timestamps()
     disableConcurrentBuilds()
-    ansiColor('xterm')
     buildDiscarder(logRotator(numToKeepStr: '20'))
-  }
+    timeout(time: 15, unit: 'MINUTES')
+}
 
-  environment {
+environment {
     COMPOSE_PROJECT_NAME = "mtm-${BUILD_NUMBER}"
-    BASE_URL             = 'http://web:3000'
-  }
+    BASE_URL = 'http://web:3000'
+}
 
-  stages {
+stages {
     stage('Checkout') {
-      steps {
-        checkout scm
-      }
+        steps {
+            checkout scm
+        }
     }
 
     stage('Install') {
-      steps {
-        sh '''
-          set -eu
-          echo "Node:    $(node --version 2>/dev/null || echo 'missing')"
-          echo "npm:     $(npm --version 2>/dev/null || echo 'missing')"
-          echo "Docker:  $(docker --version 2>/dev/null || echo 'missing')"
-          echo "Compose: $(docker compose version 2>/dev/null || echo 'missing')"
-        '''
-      }
+        steps {
+            sh '''
+                set -eu
+
+                echo "=== Environment ==="
+                echo "Node:    $(node --version 2>/dev/null || echo 'missing')"
+                echo "npm:     $(npm --version 2>/dev/null || echo 'missing')"
+                echo "Docker:  $(docker --version 2>/dev/null || echo 'missing')"
+                echo "Compose: $(docker compose version 2>/dev/null || echo 'missing')"
+
+                echo "=== Workspace ==="
+                pwd
+                ls -la
+            '''
+        }
     }
 
     stage('Start/Test Application') {
-      steps {
-        sh '''
-          set -eu
-          docker compose down -v --remove-orphans || true
-          docker compose up -d --build --wait web
-          docker compose ps
-        '''
-      }
+        steps {
+            sh '''
+                set -eu
+
+                echo "=== Clean previous Compose resources ==="
+                docker compose down -v --remove-orphans || true
+
+                echo "=== Start web application ==="
+                docker compose up -d --build --wait web
+
+                echo "=== Compose status ==="
+                docker compose ps
+            '''
+        }
     }
 
     stage('Playwright E2E') {
-      steps {
-        sh '''
-          set -eu
-          docker compose up --build --abort-on-container-exit --exit-code-from playwright
-        '''
-      }
-    }
-  }
+        steps {
+            sh '''
+                set -eu
 
-  post {
+                echo "=== Run Playwright E2E ==="
+
+                docker compose up \
+                    --build \
+                    --abort-on-container-exit \
+                    --exit-code-from playwright
+            '''
+        }
+    }
+}
+
+post {
     always {
-      sh 'docker compose down -v --remove-orphans || true'
+        echo "=== Publish E2E reports ==="
+
+        junit(
+            testResults: 'e2e/reports/junit-e2e.xml',
+            allowEmptyResults: true
+        )
+
+        archiveArtifacts(
+            artifacts: 'e2e/playwright-report/**',
+            fingerprint: true,
+            allowEmptyArchive: true
+        )
+
+        archiveArtifacts(
+            artifacts: 'e2e/reports/junit-e2e.xml',
+            fingerprint: true,
+            allowEmptyArchive: true
+        )
+
+        archiveArtifacts(
+            artifacts: 'e2e/test-results/**',
+            fingerprint: true,
+            allowEmptyArchive: true
+        )
+
+        echo "=== Cleanup Docker Compose ==="
+
+        sh '''
+            docker compose down -v --remove-orphans || true
+        '''
     }
+
     success {
-      junit testResults: 'e2e/reports/junit-e2e.xml', allowEmptyResults: false
-      archiveArtifacts artifacts: 'e2e/playwright-report/**,e2e/reports/junit-e2e.xml,e2e/test-results/**',
-                         fingerprint: true,
-                         allowEmptyArchive: false
+        echo "E2E TEST PASSED"
     }
+
     failure {
-      junit testResults: 'e2e/reports/junit-e2e.xml', allowEmptyResults: true
-      archiveArtifacts artifacts: 'e2e/playwright-report/**,e2e/reports/junit-e2e.xml,e2e/test-results/**',
-                         fingerprint: true,
-                         allowEmptyArchive: true
+        echo "E2E TEST FAILED"
     }
-  }
+}
+```
+
 }
