@@ -3,6 +3,7 @@ agent {
 label 'linux-build'
 }
 
+```
 options {
     timestamps()
     disableConcurrentBuilds()
@@ -248,5 +249,6 @@ post {
         echo 'PIPELINE FAILED'
     }
 }
+```
 
 }
