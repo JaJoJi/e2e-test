@@ -1,6 +1,7 @@
 pipeline {
 agent { label 'linux-build' }
 
+```
 options {
     timestamps()
     disableConcurrentBuilds()
@@ -40,69 +41,79 @@ stages {
 
     stage('Start/Test Application') {
         steps {
-            sh '''
-                set -eu
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
 
-                echo "=== Clean previous Compose resources ==="
-                docker compose down -v --remove-orphans || true
+                    echo "=== Project Directory ==="
+                    pwd
+                    ls -la
 
-                echo "=== Start web application ==="
-                docker compose up -d --build --wait web
+                    echo "=== Clean previous Compose resources ==="
+                    docker compose down -v --remove-orphans || true
 
-                echo "=== Compose status ==="
-                docker compose ps
-            '''
+                    echo "=== Start web application ==="
+                    docker compose up -d --build --wait web
+
+                    echo "=== Compose status ==="
+                    docker compose ps
+                '''
+            }
         }
     }
 
     stage('Playwright E2E') {
         steps {
-            sh '''
-                set -eu
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
 
-                echo "=== Run Playwright E2E ==="
+                    echo "=== Run Playwright E2E ==="
 
-                docker compose up \
-                    --build \
-                    --abort-on-container-exit \
-                    --exit-code-from playwright
-            '''
+                    docker compose up \
+                        --build \
+                        --abort-on-container-exit \
+                        --exit-code-from playwright
+                '''
+            }
         }
     }
 }
 
 post {
     always {
-        echo "=== Publish E2E reports ==="
+        dir('mini-task-manager') {
+            echo "=== Publish E2E reports ==="
 
-        junit(
-            testResults: 'e2e/reports/junit-e2e.xml',
-            allowEmptyResults: true
-        )
+            junit(
+                testResults: 'e2e/reports/junit-e2e.xml',
+                allowEmptyResults: true
+            )
 
-        archiveArtifacts(
-            artifacts: 'e2e/playwright-report/**',
-            fingerprint: true,
-            allowEmptyArchive: true
-        )
+            archiveArtifacts(
+                artifacts: 'e2e/playwright-report/**',
+                fingerprint: true,
+                allowEmptyArchive: true
+            )
 
-        archiveArtifacts(
-            artifacts: 'e2e/reports/junit-e2e.xml',
-            fingerprint: true,
-            allowEmptyArchive: true
-        )
+            archiveArtifacts(
+                artifacts: 'e2e/reports/junit-e2e.xml',
+                fingerprint: true,
+                allowEmptyArchive: true
+            )
 
-        archiveArtifacts(
-            artifacts: 'e2e/test-results/**',
-            fingerprint: true,
-            allowEmptyArchive: true
-        )
+            archiveArtifacts(
+                artifacts: 'e2e/test-results/**',
+                fingerprint: true,
+                allowEmptyArchive: true
+            )
 
-        echo "=== Cleanup Docker Compose ==="
+            echo "=== Cleanup Docker Compose ==="
 
-        sh '''
-            docker compose down -v --remove-orphans || true
-        '''
+            sh '''
+                docker compose down -v --remove-orphans || true
+            '''
+        }
     }
 
     success {
@@ -113,4 +124,6 @@ post {
         echo "E2E TEST FAILED"
     }
 }
+```
+
 }
