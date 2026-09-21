@@ -32,6 +32,37 @@ stages {
         }
     }
 
+    stage('Secrets Detection — Gitleaks') {
+        steps {
+        sh '''
+        set -eu
+
+                echo "=== Gitleaks Secrets Detection ==="
+                echo "Scanning full Git history..."
+
+                docker run --rm \
+                    -v "$PWD:/repo" \
+                    zricethezav/gitleaks:latest \
+                    detect \
+                    --source=/repo \
+                    --redact \
+                    --report-format sarif \
+                    --report-path=/repo/gitleaks.sarif
+            '''
+        }
+
+        post {
+            always {
+                archiveArtifacts(
+                    artifacts: 'gitleaks.sarif',
+                    fingerprint: true,
+                    allowEmptyArchive: true
+                )
+            }
+        }
+
+        }
+
     stage('Install') {
         steps {
             dir('mini-task-manager') {
