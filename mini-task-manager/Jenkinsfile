@@ -558,6 +558,60 @@ NODE
         }
     }
 
+    stage('Build Image') {
+        steps {
+            dir('mini-task-manager') {
+                script {
+                    env.SHORT_SHA = env.GIT_COMMIT.take(7)
+                }
+                sh '''
+                    set -eu
+
+                    echo "=== Build Image ==="
+
+                    IMAGE="taskflow-api:${SHORT_SHA}"
+                    REGISTRY_IMAGE="localhost:5000/taskflow-api:${SHORT_SHA}"
+
+                    echo "Image:          ${IMAGE}"
+                    echo "Registry image: ${REGISTRY_IMAGE}"
+
+                    # Tag must be the 7-character Git short SHA.
+                    echo "${SHORT_SHA}" | grep -Eq '^[0-9a-f]{7}$'
+
+                    # 1. Ensure the local registry (registry:2) is running.
+                    #    Idempotent: reuse the existing container when present.
+                    if [ -z "$(docker ps -q -f 'name=^local-registry$')" ]; then
+                        if [ -n "$(docker ps -aq -f 'name=^local-registry$')" ]; then
+                            echo "Starting existing local-registry container..."
+                            docker start local-registry
+                        else
+                            echo "Creating local registry (registry:2)..."
+                            docker run -d --name local-registry --restart unless-stopped -p 5000:5000 registry:2
+                        fi
+                    else
+                        echo "Local registry already running."
+                    fi
+
+                    # 2. Build the image from mini-task-manager/Dockerfile.
+                    #    Any failure here fails the pipeline (no '|| true').
+                    docker build -t "${IMAGE}" -f Dockerfile .
+
+                    # 3. Tag for the local registry and push.
+                    docker tag "${IMAGE}" "${REGISTRY_IMAGE}"
+                    docker push "${REGISTRY_IMAGE}"
+
+                    # 4. Verify the push: drop the local registry-tagged copy
+                    #    and pull it back. Pull succeeds only if the push landed.
+                    docker rmi "${REGISTRY_IMAGE}"
+                    docker pull "${REGISTRY_IMAGE}"
+
+                    echo "=== Build + Push verified ==="
+                    docker images "localhost:5000/taskflow-api" --format '{{.Repository}}:{{.Tag}}'
+                '''
+            }
+        }
+    }
+
     stage('Install') {
         steps {
             dir('mini-task-manager') {
