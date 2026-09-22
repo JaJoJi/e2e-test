@@ -11,14 +11,6 @@ options {
     timeout(time: 15, unit: 'MINUTES')
 }
 
-parameters {
-    booleanParam(
-        name: 'BG_DEMO_BREAK',
-        defaultValue: false,
-        description: 'Lab 07 rollback demo only: when true, fail intentionally AFTER the service switch so post.failure rolls traffic back. Normal builds leave this false.'
-    )
-}
-
 environment {
     COMPOSE_PROJECT_NAME = "mtm-${BUILD_NUMBER}"
     BASE_URL = 'http://web:3000'
@@ -942,16 +934,6 @@ NODE
                             *) echo "ERROR: endpoint ${IP} is not a ${NEXT} pod"; exit 1 ;;
                         esac
                     done
-
-                    # Lab 07 rollback-demo hook: intentional post-switch
-                    # failure. Skipped unless BG_DEMO_BREAK=true (default
-                    # false), so normal builds behave exactly as before.
-                    # Placed AFTER the switch + verification, so the failure
-                    # always happens after traffic moved to the next color.
-                    if [ "${BG_DEMO_BREAK:-false}" = "true" ]; then
-                        echo "DEMO: intentional post-switch failure (rollback demonstration)"
-                        exit 1
-                    fi
 
                     # 13. Summary.
                     echo "=== Blue/Green summary ==="
