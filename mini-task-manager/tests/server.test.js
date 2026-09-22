@@ -92,4 +92,77 @@ describe('Express app routes', () => {
       expect(res.body.error).toBe('Not Found');
     });
   });
+
+  describe('Missing request bodies', () => {
+    test('POST without a body is treated as an empty object and returns 400', async () => {
+      const res = await request(app).post('/api/tasks');
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Title is required');
+    });
+
+    test('PATCH without a body leaves the task unchanged and returns 200', async () => {
+      const created = await request(app)
+        .post('/api/tasks')
+        .send({ title: 'No-body patch' });
+      const res = await request(app).patch(`/api/tasks/${created.body.id}`);
+      expect(res.status).toBe(200);
+      expect(res.body.title).toBe('No-body patch');
+    });
+  });
+
+  describe('Standalone mode (require.main === module)', () => {
+    const { spawn } = require('node:child_process');
+
+    async function bootServer() {
+      const child = spawn(process.execPath, ['src/server.js'], {
+        cwd: __dirname + '/..',
+        env: { ...process.env, PORT: '0' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let output = '';
+      const port = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('server did not start')), 10000);
+        child.stdout.on('data', (chunk) => {
+          output += chunk.toString();
+          const m = output.match(/listening on port (\d+)/);
+          if (m) {
+            clearTimeout(timer);
+            resolve(Number(m[1]));
+          }
+        });
+        child.on('error', reject);
+      });
+      return { child, port };
+    }
+
+    function stopServer(child, signal) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          child.kill('SIGKILL');
+          reject(new Error(`server did not exit on ${signal}`));
+        }, 10000);
+        child.on('exit', (code) => {
+          clearTimeout(timer);
+          resolve(code);
+        });
+        child.kill(signal);
+      });
+    }
+
+    test('boots, serves /api/health, and shuts down cleanly on SIGTERM', async () => {
+      const { child, port } = await bootServer();
+      try {
+        const res = await fetch(`http://127.0.0.1:${port}/api/health`);
+        expect(res.status).toBe(200);
+        expect((await res.json()).status).toBe('ok');
+      } finally {
+        await expect(stopServer(child, 'SIGTERM')).resolves.toBe(0);
+      }
+    }, 15000);
+
+    test('shuts down cleanly on SIGINT', async () => {
+      const { child } = await bootServer();
+      await expect(stopServer(child, 'SIGINT')).resolves.toBe(0);
+    }, 15000);
+  });
 });

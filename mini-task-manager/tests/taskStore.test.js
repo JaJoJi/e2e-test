@@ -63,6 +63,11 @@ describe('TaskStore', () => {
       expect(store.createTask(undefined).error).toBe('Title is required');
       expect(store.listTasks()).toHaveLength(0);
     });
+
+    test('coerces non-string input to a trimmed string title', () => {
+      expect(store.createTask(42).task).toMatchObject({ title: '42' });
+      expect(store.createTask(true).task).toMatchObject({ title: 'true' });
+    });
   });
 
   describe('updateTask()', () => {
