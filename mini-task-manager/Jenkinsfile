@@ -11,6 +11,14 @@ options {
     timeout(time: 15, unit: 'MINUTES')
 }
 
+parameters {
+    booleanParam(
+        name: 'BG_DEMO_BREAK',
+        defaultValue: false,
+        description: 'Lab 07 rollback demo only: when true, fail intentionally AFTER the service switch so post.failure rolls traffic back. Normal builds leave this false.'
+    )
+}
+
 environment {
     COMPOSE_PROJECT_NAME = "mtm-${BUILD_NUMBER}"
     BASE_URL = 'http://web:3000'
@@ -935,6 +943,16 @@ NODE
                         esac
                     done
 
+                    # Lab 07 rollback-demo hook: intentional post-switch
+                    # failure. Skipped unless BG_DEMO_BREAK=true (default
+                    # false), so normal builds behave exactly as before.
+                    # Placed AFTER the switch + verification, so the failure
+                    # always happens after traffic moved to the next color.
+                    if [ "${BG_DEMO_BREAK:-false}" = "true" ]; then
+                        echo "DEMO: intentional post-switch failure (rollback demonstration)"
+                        exit 1
+                    fi
+
                     # 13. Summary.
                     echo "=== Blue/Green summary ==="
                     echo "current color : ${CURRENT}"
@@ -977,6 +995,22 @@ NODE
                             docker run --rm --network kind -v "${KUBECONFIG_HOST}:/kubeconfig:ro" -e KUBECONFIG=/kubeconfig "${KUBECTL_IMG}" --context kind-taskflow patch svc taskflow -p '{"spec":{"selector":{"app":"taskflow","color":"'"${BG_CURRENT}"'"}}}'
                             echo "ROLLBACK: switched traffic back to ${BG_CURRENT}"
                         fi
+                        echo "=== Rollback verification ==="
+                        sleep 10
+                        RB_COLOR="$(docker run --rm --network kind -v "${KUBECONFIG_HOST}:/kubeconfig:ro" -e KUBECONFIG=/kubeconfig "${KUBECTL_IMG}" --context kind-taskflow get svc taskflow -o "jsonpath={.spec.selector.color}")"
+                        if [ "${RB_COLOR}" != "${BG_CURRENT}" ]; then
+                            echo "ERROR: rollback verification FAILED, service color is '${RB_COLOR}', expected '${BG_CURRENT}'"
+                            exit 1
+                        fi
+                        RB_IPS="$(docker run --rm --network kind -v "${KUBECONFIG_HOST}:/kubeconfig:ro" -e KUBECONFIG=/kubeconfig "${KUBECTL_IMG}" --context kind-taskflow get pods -l "app=taskflow,color=${BG_CURRENT}" -o "jsonpath={.items[*].status.podIP}")"
+                        RB_EPS="$(docker run --rm --network kind -v "${KUBECONFIG_HOST}:/kubeconfig:ro" -e KUBECONFIG=/kubeconfig "${KUBECTL_IMG}" --context kind-taskflow get endpoints taskflow -o "jsonpath={.subsets[*].addresses[*].ip}")"
+                        for IP in ${RB_EPS}; do
+                            case " ${RB_IPS} " in
+                                *" ${IP} "*) echo "Endpoint ${IP} is a ${BG_CURRENT} pod" ;;
+                                *) echo "ERROR: endpoint ${IP} is not a ${BG_CURRENT} pod"; exit 1 ;;
+                            esac
+                        done
+                        echo "ROLLBACK_VERIFIED: service on ${BG_CURRENT} with correct endpoints"
                     '''
                 }
             }
