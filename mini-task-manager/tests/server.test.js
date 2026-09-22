@@ -165,4 +165,25 @@ describe('Express app routes', () => {
       await expect(stopServer(child, 'SIGINT')).resolves.toBe(0);
     }, 15000);
   });
+
+  describe('BREAK_AFTER_SEC demo hook (dormant unless set)', () => {
+    test('flips /api/health to 500 after the configured delay', async () => {
+      jest.useFakeTimers();
+      try {
+        process.env.BREAK_AFTER_SEC = '30';
+        let bombApp;
+        jest.isolateModules(() => {
+          bombApp = require('../src/server');
+        });
+        delete process.env.BREAK_AFTER_SEC;
+        await request(bombApp).get('/api/health').expect(200);
+        jest.advanceTimersByTime(31000);
+        const res = await request(bombApp).get('/api/health');
+        expect(res.status).toBe(500);
+        expect(res.body.status).toBe('broken');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
 });
