@@ -821,6 +821,168 @@ NODE
         }
     }
 
+    stage('Blue/Green Deploy') {
+        steps {
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
+
+                    echo "=== Blue/Green Deploy ==="
+
+                    KUBECTL_IMG="rancher/kubectl:v1.34.9"
+                    # Volume source is resolved by the Docker daemon, so this
+                    # must be a daemon-host path. In production this kubeconfig
+                    # must come from Jenkins credentials, never from Git.
+                    KUBECONFIG_HOST="C:/Users/User/.kube/kind-taskflow-agent"
+
+                    echo "${SHORT_SHA}" | grep -Eq '^[0-9a-f]{7}$'
+                    IMAGE="taskflow-api:${SHORT_SHA}"
+                    echo "Image: ${IMAGE}"
+
+                    rm -f .bg-current .bg-next
+
+                    kc() {
+                        docker run --rm --network kind \
+                            -v "${KUBECONFIG_HOST}:/kubeconfig:ro" \
+                            -e KUBECONFIG=/kubeconfig \
+                            "${KUBECTL_IMG}" --context kind-taskflow "$@"
+                    }
+
+                    # 1-2. Current color, must be exactly blue or green.
+                    CURRENT="$(kc get svc taskflow -o "jsonpath={.spec.selector.color}")"
+                    echo "Current color: ${CURRENT}"
+                    if [ "${CURRENT}" != "blue" ] && [ "${CURRENT}" != "green" ]; then
+                        echo "ERROR: unexpected service color '${CURRENT}' (must be blue or green)"
+                        exit 1
+                    fi
+
+                    # 3. Next color via explicit equality check.
+                    if [ "${CURRENT}" = "blue" ]; then
+                        NEXT="green"
+                    else
+                        NEXT="blue"
+                    fi
+                    echo "Next color: ${NEXT}"
+
+                    # 4. Persist colors for the post-failure rollback block.
+                    echo "${CURRENT}" > .bg-current
+                    echo "${NEXT}" > .bg-next
+
+                    # 5. Load the SHA image into Kind. The agent has no kind
+                    #    binary, so replicate `kind load docker-image` with the
+                    #    existing Docker access: save the image and import it
+                    #    into the Kind node containerd (namespace k8s.io).
+                    echo "Loading ${IMAGE} into Kind..."
+                    docker save "${IMAGE}" | docker exec -i taskflow-control-plane ctr --namespace k8s.io images import -
+
+                    # 6-7. Roll out ONLY the inactive deployment, then wait.
+                    echo "Rolling out taskflow-${NEXT} with ${IMAGE}..."
+                    kc set image "deployment/taskflow-${NEXT}" "app=${IMAGE}"
+                    kc rollout status "deployment/taskflow-${NEXT}" --timeout=120s
+
+                    # 8. Verify two Ready pods with correct labels and image.
+                    READY="$(kc get "deployment/taskflow-${NEXT}" -o "jsonpath={.status.readyReplicas}")"
+                    if [ "${READY}" != "2" ]; then
+                        echo "ERROR: expected 2 readyReplicas on taskflow-${NEXT}, got '${READY}'"
+                        exit 1
+                    fi
+                    kc wait --for=condition=Ready -l "app=taskflow,color=${NEXT}" pod --timeout=60s
+                    PODS="$(kc get pods -l "app=taskflow,color=${NEXT}" -o "jsonpath={.items[*].metadata.name}")"
+                    COUNT=0
+                    for POD in ${PODS}; do
+                        COUNT=$((COUNT + 1))
+                        POD_IMAGE="$(kc get "pod/${POD}" -o "jsonpath={.spec.containers[0].image}")"
+                        if [ "${POD_IMAGE}" != "${IMAGE}" ]; then
+                            echo "ERROR: pod ${POD} uses image '${POD_IMAGE}', expected '${IMAGE}'"
+                            exit 1
+                        fi
+                        echo "Verified ${POD} (image ${POD_IMAGE}, Ready)"
+                    done
+                    if [ "${COUNT}" != "2" ]; then
+                        echo "ERROR: expected 2 taskflow-${NEXT} pods, found ${COUNT}"
+                        exit 1
+                    fi
+
+                    # 9. Smoke test the NEW pods directly (service still points
+                    #    to the old color). Fails the stage on bad response.
+                    for POD in ${PODS}; do
+                        echo "Smoke testing ${POD}..."
+                        BODY="$(kc exec "${POD}" -- wget -q -O - "http://127.0.0.1:8080/api/health")"
+                        echo "${POD}: ${BODY}"
+                        echo "${BODY}" | grep -q '"status":"ok"'
+                    done
+                    echo "Smoke test: 2/2 new pods healthy"
+
+                    # 10. Switch the service to the new color (app stays).
+                    kc patch svc taskflow -p '{"spec":{"selector":{"app":"taskflow","color":"'"${NEXT}"'"}}}'
+
+                    # 11-12. Verify selector and that endpoints are new pods.
+                    FINAL_COLOR="$(kc get svc taskflow -o "jsonpath={.spec.selector.color}")"
+                    if [ "${FINAL_COLOR}" != "${NEXT}" ]; then
+                        echo "ERROR: service color is '${FINAL_COLOR}', expected '${NEXT}'"
+                        exit 1
+                    fi
+                    NEXT_IPS="$(kc get pods -l "app=taskflow,color=${NEXT}" -o "jsonpath={.items[*].status.podIP}")"
+                    EPS="$(kc get endpoints taskflow -o "jsonpath={.subsets[*].addresses[*].ip}")"
+                    if [ -z "${EPS}" ]; then
+                        echo "ERROR: service taskflow has no endpoints"
+                        exit 1
+                    fi
+                    for IP in ${EPS}; do
+                        case " ${NEXT_IPS} " in
+                            *" ${IP} "*) echo "Endpoint ${IP} is a ${NEXT} pod" ;;
+                            *) echo "ERROR: endpoint ${IP} is not a ${NEXT} pod"; exit 1 ;;
+                        esac
+                    done
+
+                    # 13. Summary.
+                    echo "=== Blue/Green summary ==="
+                    echo "current color : ${CURRENT}"
+                    echo "next color    : ${NEXT}"
+                    echo "image         : ${IMAGE}"
+                    echo "rollout       : OK"
+                    echo "smoke test    : OK (2/2 pods)"
+                    echo "service color : ${FINAL_COLOR}"
+
+                    rm -f .bg-current .bg-next
+                '''
+
+                script {
+                    if (fileExists('.bg-current')) {
+                        env.BG_CURRENT = readFile('.bg-current').trim()
+                    }
+                    if (fileExists('.bg-next')) {
+                        env.BG_NEXT = readFile('.bg-next').trim()
+                    }
+                }
+            }
+        }
+
+        post {
+            failure {
+                dir('mini-task-manager') {
+                    sh '''
+                        set -eu
+                        echo "=== Blue/Green Rollback ==="
+                        if [ -z "${BG_CURRENT:-}" ]; then
+                            echo "No color state recorded (failure before color detection). Nothing to roll back."
+                            exit 0
+                        fi
+                        KUBECTL_IMG="rancher/kubectl:v1.34.9"
+                        KUBECONFIG_HOST="C:/Users/User/.kube/kind-taskflow-agent"
+                        LIVE="$(docker run --rm --network kind -v "${KUBECONFIG_HOST}:/kubeconfig:ro" -e KUBECONFIG=/kubeconfig "${KUBECTL_IMG}" --context kind-taskflow get svc taskflow -o "jsonpath={.spec.selector.color}")"
+                        if [ "${LIVE}" = "${BG_CURRENT}" ]; then
+                            echo "ROLLBACK: service already on ${BG_CURRENT}, traffic never left. No switch needed."
+                        else
+                            docker run --rm --network kind -v "${KUBECONFIG_HOST}:/kubeconfig:ro" -e KUBECONFIG=/kubeconfig "${KUBECTL_IMG}" --context kind-taskflow patch svc taskflow -p '{"spec":{"selector":{"app":"taskflow","color":"'"${BG_CURRENT}"'"}}}'
+                            echo "ROLLBACK: switched traffic back to ${BG_CURRENT}"
+                        fi
+                    '''
+                }
+            }
+        }
+    }
+
     stage('Deploy — Staging') {
         steps {
             dir('mini-task-manager') {
