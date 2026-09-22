@@ -982,8 +982,15 @@ NODE
                     sh '''
                         set -eu
                         echo "=== Blue/Green Rollback ==="
-                        if [ -z "${BG_CURRENT:-}" ]; then
-                            echo "No color state recorded (failure before color detection). Nothing to roll back."
+                        # Read state from the workspace file directly: env set
+                        # by later steps is empty when the main sh failed, but
+                        # this file persists (it is removed only on success).
+                        BG_CURRENT=""
+                        if [ -f .bg-current ]; then
+                            BG_CURRENT="$(cat .bg-current)"
+                        fi
+                        if [ "${BG_CURRENT}" != "blue" ] && [ "${BG_CURRENT}" != "green" ]; then
+                            echo "No valid color state recorded (failure before color detection). Nothing to roll back."
                             exit 0
                         fi
                         KUBECTL_IMG="rancher/kubectl:v1.34.9"
