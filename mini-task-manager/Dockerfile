@@ -6,10 +6,6 @@ FROM node:22-alpine
 ENV NODE_ENV=production \
     PORT=3000
 
-# TEMPORARY Lab 07 rollback-demo: arm the dormant BREAK_AFTER_SEC hook so the
-# demo image fails post-switch. Reverted right after the demonstration.
-ENV BREAK_AFTER_SEC=90
-
 WORKDIR /app
 
 COPY package.json package-lock.json* ./

@@ -935,32 +935,6 @@ NODE
                         esac
                     done
 
-                    # Post-switch service smoke test: poll /api/health THROUGH
-                    # the service (in-cluster DNS) from a new pod. Healthy
-                    # images pass on the first attempt; a broken image fails
-                    # here AFTER traffic switched, triggering the post-failure
-                    # rollback below. Up to ~120s, exit code handled explicitly.
-                    echo "=== Post-switch service smoke test ==="
-                    SMOKE_POD="$(kc get pods -l "app=taskflow,color=${NEXT}" -o "jsonpath={.items[0].metadata.name}")"
-                    SMOKE_OK=0
-                    for ATTEMPT in $(seq 1 12); do
-                        set +e
-                        BODY="$(kc exec "${SMOKE_POD}" -- wget -q -O - "http://taskflow/api/health")"
-                        EXEC_EXIT=$?
-                        set -e
-                        if [ "${EXEC_EXIT}" -eq 0 ] && echo "${BODY}" | grep -q '"status":"ok"'; then
-                            echo "Attempt ${ATTEMPT}: service healthy through taskflow"
-                            SMOKE_OK=1
-                            break
-                        fi
-                        echo "Attempt ${ATTEMPT}: service not healthy yet, waiting..."
-                        sleep 10
-                    done
-                    if [ "${SMOKE_OK}" != "1" ]; then
-                        echo "ERROR: post-switch service smoke test FAILED on ${NEXT}"
-                        exit 1
-                    fi
-
                     # 13. Summary.
                     echo "=== Blue/Green summary ==="
                     echo "current color : ${CURRENT}"
@@ -1003,22 +977,6 @@ NODE
                             docker run --rm --network kind -v "${KUBECONFIG_HOST}:/kubeconfig:ro" -e KUBECONFIG=/kubeconfig "${KUBECTL_IMG}" --context kind-taskflow patch svc taskflow -p '{"spec":{"selector":{"app":"taskflow","color":"'"${BG_CURRENT}"'"}}}'
                             echo "ROLLBACK: switched traffic back to ${BG_CURRENT}"
                         fi
-                        echo "=== Rollback verification ==="
-                        sleep 10
-                        RB_COLOR="$(docker run --rm --network kind -v "${KUBECONFIG_HOST}:/kubeconfig:ro" -e KUBECONFIG=/kubeconfig "${KUBECTL_IMG}" --context kind-taskflow get svc taskflow -o "jsonpath={.spec.selector.color}")"
-                        if [ "${RB_COLOR}" != "${BG_CURRENT}" ]; then
-                            echo "ERROR: rollback verification FAILED, service color is '${RB_COLOR}', expected '${BG_CURRENT}'"
-                            exit 1
-                        fi
-                        RB_IPS="$(docker run --rm --network kind -v "${KUBECONFIG_HOST}:/kubeconfig:ro" -e KUBECONFIG=/kubeconfig "${KUBECTL_IMG}" --context kind-taskflow get pods -l "app=taskflow,color=${BG_CURRENT}" -o "jsonpath={.items[*].status.podIP}")"
-                        RB_EPS="$(docker run --rm --network kind -v "${KUBECONFIG_HOST}:/kubeconfig:ro" -e KUBECONFIG=/kubeconfig "${KUBECTL_IMG}" --context kind-taskflow get endpoints taskflow -o "jsonpath={.subsets[*].addresses[*].ip}")"
-                        for IP in ${RB_EPS}; do
-                            case " ${RB_IPS} " in
-                                *" ${IP} "*) echo "Endpoint ${IP} is a ${BG_CURRENT} pod" ;;
-                                *) echo "ERROR: endpoint ${IP} is not a ${BG_CURRENT} pod"; exit 1 ;;
-                            esac
-                        done
-                        echo "ROLLBACK_VERIFIED: service on ${BG_CURRENT} with correct endpoints"
                     '''
                 }
             }

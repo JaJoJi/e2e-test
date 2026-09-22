@@ -6,25 +6,10 @@ const app = express();
 const PORT = parseInt(process.env.PORT, 10) || 3000;
 const store = createTaskStore();
 
-// Lab 07 rollback-demo hook: dormant unless BREAK_AFTER_SEC is set to a
-// positive number (production manifests never set it; only the temporary
-// demo image does). When armed, /api/health starts failing after the delay
-// so the post-switch service smoke test fails and traffic rolls back.
-let healthBroken = false;
-const breakAfterSec = parseInt(process.env.BREAK_AFTER_SEC, 10);
-if (Number.isFinite(breakAfterSec) && breakAfterSec > 0) {
-  setTimeout(() => {
-    healthBroken = true;
-  }, breakAfterSec * 1000);
-}
-
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/api/health', (req, res) => {
-  if (healthBroken) {
-    return res.status(500).json({ status: 'broken' });
-  }
   res.status(200).json({ status: 'ok', uptime: process.uptime() });
 });
 
