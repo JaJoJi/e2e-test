@@ -52,6 +52,15 @@
       changed_when: false
       when: ansible_service_mgr != "systemd"
 
+    - name: Load preloaded taskflow-api image into target Docker
+      # The tarball is placed at /tmp by the delivery pipeline (private
+      # lab images are not on Docker Hub). Loaded via the Docker API,
+      # so no Docker CLI is needed on the target.
+      community.docker.docker_image:
+        name: "{{ taskflow_image_repo }}:{{ taskflow_image_tag }}"
+        load_path: /tmp/taskflow-image.tar
+        source: load
+
     - name: Run taskflow-api image with immutable tag
       # pull: false because private lab images are preloaded into the
       # target daemon by the delivery pipeline (same pattern as kind load);

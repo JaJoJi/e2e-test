@@ -984,7 +984,7 @@ nothing is applied automatically.''', ok: 'Proceed'
                     ANS_CTR="ansible-run-${BUILD_NUMBER:-$$}"
                     cleanup() {
                         docker rm -f "${TF_CTR}" "${ANS_CTR}" > /dev/null
-                        rm -f ansible-inventory.ini
+                        rm -f ansible-inventory.ini taskflow-image.tar
                     }
                     trap cleanup EXIT
                     docker create --name "${TF_CTR}" --network jenkins -v /var/run/docker.sock:/var/run/docker.sock \
@@ -1008,11 +1008,13 @@ nothing is applied automatically.''', ok: 'Proceed'
                     #    no passwords, no private keys in the repository.
                     printf '[taskflow]\n%s ansible_user=%s\n' "${INSTANCE_IP}" "${SSH_USERNAME}" > ansible-inventory.ini
 
-                    # 3. Preload the immutable lab image into the target
-                    #    daemon (private images are not on Docker Hub; same
-                    #    pattern as kind load). The playbook then uses it
-                    #    with pull disabled.
-                    docker save "taskflow-api:${SHORT_SHA}" | docker exec -i "${INSTANCE_IP}" docker load
+                    # 3. Preload the immutable lab image as a tarball into the
+                    #    target (the target has no Docker CLI yet; the
+                    #    playbook loads it via the Docker API after dockerd
+                    #    is up). Same kind-load idea, daemon-side only.
+                    docker save "taskflow-api:${SHORT_SHA}" -o taskflow-image.tar
+                    docker cp taskflow-image.tar "${INSTANCE_IP}:/tmp/taskflow-image.tar"
+                    rm -f taskflow-image.tar
 
                     # 4. Run the real playbook against the provisioned host,
                     #    reached by container name over the lab network.
