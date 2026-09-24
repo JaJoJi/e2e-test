@@ -857,7 +857,13 @@ NODE
                         docker rm -f "${TF_CTR}" > /dev/null
                     }
                     trap cleanup EXIT
-                    docker create --name "${TF_CTR}" --network jenkins --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
+                    # LocalStack dummy credentials ("test") for the Terraform
+                    # AWS provider chain; EC2 metadata lookup is disabled so
+                    # the SDK never leaves the lab network. Not real secrets.
+                    docker create --name "${TF_CTR}" --network jenkins \
+                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
+                        -e AWS_DEFAULT_REGION=us-east-1 -e AWS_EC2_METADATA_DISABLED=true \
+                        --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
                     docker start "${TF_CTR}" > /dev/null
                     docker exec "${TF_CTR}" mkdir -p /work
                     docker cp . "${TF_CTR}:/work/"
