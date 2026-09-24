@@ -1023,7 +1023,10 @@ nothing is applied automatically.''', ok: 'Proceed'
                     #    copied into the container only; it never lives in
                     #    the repository. Non-interactive host-key handling is
                     #    standard CI practice for ephemeral lab hosts.
-                    docker create --name "${ANS_CTR}" --network taskflow-lab08 \
+                    # The Ansible image runs as a non-root user by default;
+                    # run as root so workspace setup (mkdir/cp) works. The
+                    # SSH target user is still ubuntu via the inventory.
+                    docker create --name "${ANS_CTR}" --network taskflow-lab08 -u root \
                         -e ANSIBLE_HOST_KEY_CHECKING=false \
                         --entrypoint sh "${ANS_IMG}" -c 'sleep 600' > /dev/null
                     docker start "${ANS_CTR}" > /dev/null
