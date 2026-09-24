@@ -937,8 +937,8 @@ nothing is applied automatically.''', ok: 'Proceed'
                     }
                     trap cleanup EXIT
                     docker create --name "${TF_CTR}" --network jenkins -v /var/run/docker.sock:/var/run/docker.sock \
-                        -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
-                        -e AWS_DEFAULT_REGION=ap-southeast-1 -e AWS_EC2_METADATA_DISABLED=true \
+                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
+                        -e AWS_DEFAULT_REGION=us-east-1 -e AWS_EC2_METADATA_DISABLED=true \
                         --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
                     docker start "${TF_CTR}" > /dev/null
                     docker exec "${TF_CTR}" mkdir -p /work
@@ -988,8 +988,8 @@ nothing is applied automatically.''', ok: 'Proceed'
                     }
                     trap cleanup EXIT
                     docker create --name "${TF_CTR}" --network jenkins -v /var/run/docker.sock:/var/run/docker.sock \
-                        -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
-                        -e AWS_DEFAULT_REGION=ap-southeast-1 -e AWS_EC2_METADATA_DISABLED=true \
+                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
+                        -e AWS_DEFAULT_REGION=us-east-1 -e AWS_EC2_METADATA_DISABLED=true \
                         --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
                     docker start "${TF_CTR}" > /dev/null
                     docker exec "${TF_CTR}" mkdir -p /work
