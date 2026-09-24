@@ -1035,6 +1035,13 @@ nothing is applied automatically.''', ok: 'Proceed'
                     docker cp ansible-inventory.ini "${ANS_CTR}:/work/ansible-inventory.ini"
                     docker cp "${SSH_KEY_FILE}" "${ANS_CTR}:/tmp/ssh_key"
                     docker exec "${ANS_CTR}" chmod 600 /tmp/ssh_key
+                    # Log only the key fingerprint (never the key itself) so
+                    # a mismatched credential is diagnosable from the console.
+                    if docker exec "${ANS_CTR}" ssh-keygen -lf /tmp/ssh_key; then
+                        echo "SSH key fingerprint readable."
+                    else
+                        echo "WARNING: cannot read SSH key fingerprint; check the taskflow-ssh-key-file credential content."
+                    fi
                     docker exec "${ANS_CTR}" sh -c 'cd /work && ansible-playbook -i ansible-inventory.ini ansible/playbook.yml -e target_hosts=taskflow -e taskflow_image_tag='"${SHORT_SHA}"' -e ansible_user='"${SSH_USERNAME}"' -e ansible_ssh_private_key_file=/tmp/ssh_key'
 
                     echo "=== Ansible Configure finished ==="
