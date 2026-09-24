@@ -23,6 +23,7 @@ variable "host_image" {
 }
 
 variable "ssh_public_key" {
-  description = "Public SSH key material installed for the Ansible user. No default: supply at runtime (e.g. from Jenkins credentials). The private half is never committed."
+  description = "Public SSH key material for the taskflow key pair (public keys are not secret). Default is the lab test key; it must match the private key in the Jenkins credential taskflow-ssh-key-file. Override at runtime if the credential is rotated."
   type        = string
+  default     = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHTy/KI5T0M7260eh4MzF7G2XVBB7H5aJX4BQKdz3/4B lab08-temp-test"
 }
