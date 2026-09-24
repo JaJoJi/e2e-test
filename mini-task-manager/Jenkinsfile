@@ -11,6 +11,14 @@ options {
     timeout(time: 15, unit: 'MINUTES')
 }
 
+parameters {
+    booleanParam(
+        name: 'LAB08_DESTROY',
+        defaultValue: false,
+        description: 'Lab 08 evidence cleanup only: when true, destroy Lab 08 Terraform infrastructure after deployment stages and verify remote state is empty. Normal builds leave this false.'
+    )
+}
+
 environment {
     COMPOSE_PROJECT_NAME = "mtm-${BUILD_NUMBER}"
     BASE_URL = 'http://web:3000'
@@ -1334,6 +1342,105 @@ nothing is applied automatically.''', ok: 'Proceed'
 
             echo '=== Deploy — Production ==='
             echo 'Production deployment simulated for Lab 05.'
+        }
+    }
+
+    stage('Terraform Destroy') {
+        when {
+            expression { return params.LAB08_DESTROY == true }
+        }
+        steps {
+            dir('infra/terraform') {
+                sh '''
+                    set -eu
+
+                    echo "=== Terraform Destroy (Lab 08 evidence cleanup) ==="
+
+                    TF_IMG="hashicorp/terraform:1.16.3"
+
+                    # Same container pattern as Plan/Apply: LocalStack dummy
+                    # credentials (not real secrets) for the S3 backend.
+                    TF_CTR="tf-destroy-${BUILD_NUMBER:-$$}"
+                    cleanup() {
+                        docker rm -f "${TF_CTR}" > /dev/null
+                    }
+                    trap cleanup EXIT
+                    docker create --name "${TF_CTR}" --network jenkins -v /var/run/docker.sock:/var/run/docker.sock \
+                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
+                        -e AWS_DEFAULT_REGION=us-east-1 -e AWS_EC2_METADATA_DISABLED=true \
+                        --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
+                    docker start "${TF_CTR}" > /dev/null
+                    docker exec "${TF_CTR}" mkdir -p /work
+                    docker cp . "${TF_CTR}:/work/"
+
+                    # Init against the existing remote backend, plan the full
+                    # destroy, show it, then apply that exact plan. No
+                    # -auto-approve: this stage runs only when a human sets
+                    # LAB08_DESTROY=true. Never deletes the state bucket.
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform init -input=false'
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform plan -destroy -input=false -out=tfplan-destroy'
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform apply -input=false tfplan-destroy'
+
+                    echo "=== Terraform Destroy finished ==="
+                '''
+            }
+        }
+    }
+
+    stage('Terraform State Verify') {
+        when {
+            expression { return params.LAB08_DESTROY == true }
+        }
+        steps {
+            dir('infra/terraform') {
+                sh '''
+                    set -eu
+
+                    echo "=== Terraform State Verify ==="
+
+                    TF_IMG="hashicorp/terraform:1.16.3"
+                    LS_IMG="localstack/localstack:3.8.1"
+                    BUCKET="taskflow-terraform-state"
+                    KEY="lab08/terraform.tfstate"
+                    ENDPOINT="http://localstack:4566"
+
+                    TF_CTR="tf-state-${BUILD_NUMBER:-$$}"
+                    cleanup() {
+                        docker rm -f "${TF_CTR}" > /dev/null
+                    }
+                    trap cleanup EXIT
+                    docker create --name "${TF_CTR}" --network jenkins -v /var/run/docker.sock:/var/run/docker.sock \
+                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
+                        -e AWS_DEFAULT_REGION=us-east-1 -e AWS_EC2_METADATA_DISABLED=true \
+                        --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
+                    docker start "${TF_CTR}" > /dev/null
+                    docker exec "${TF_CTR}" mkdir -p /work
+                    docker cp . "${TF_CTR}:/work/"
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform init -input=false > /dev/null'
+
+                    # State must list zero managed resources after Destroy.
+                    RESOURCES="$(docker exec "${TF_CTR}" sh -c 'cd /work && terraform state list')"
+                    if [ -n "${RESOURCES}" ]; then
+                        echo "ERROR: managed resources remain in state:"
+                        echo "${RESOURCES}"
+                        exit 1
+                    fi
+                    echo "State resources: 0"
+
+                    # The remote state object itself must still exist: only
+                    # managed resources are destroyed, never the bucket.
+                    if docker run --rm --network jenkins --entrypoint awslocal \
+                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=us-east-1 \
+                        "${LS_IMG}" --endpoint-url="${ENDPOINT}" s3 ls "s3://${BUCKET}/${KEY}" > /dev/null 2>&1; then
+                        echo "Remote state object: PRESENT (s3://${BUCKET}/${KEY})"
+                    else
+                        echo "ERROR: remote state object s3://${BUCKET}/${KEY} is missing"
+                        exit 1
+                    fi
+
+                    echo "Terraform state verification: PASS"
+                '''
+            }
         }
     }
 
