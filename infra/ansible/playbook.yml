@@ -1,0 +1,38 @@
+---
+- name: Prepare taskflow application host
+  hosts: "{{ target_hosts | default('taskflow_nodes') }}"
+  become: true
+  vars:
+    taskflow_image_repo: "taskflow-api"
+    # Immutable Lab 07 image tag. Never "latest".
+    taskflow_image_tag: "674a51a"
+    taskflow_host_port: 8080
+    taskflow_container_port: 8080
+    ansible_remote_user: "ubuntu"
+  tasks:
+    - name: Install Node.js runtime
+      ansible.builtin.apt:
+        name: nodejs
+        state: present
+        update_cache: true
+
+    - name: Install Docker engine
+      ansible.builtin.apt:
+        name: docker.io
+        state: present
+
+    - name: Ensure Docker service is running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Pull taskflow-api image with immutable tag
+      community.docker.docker_container:
+        name: taskflow-api
+        image: "{{ taskflow_image_repo }}:{{ taskflow_image_tag }}"
+        pull: true
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "{{ taskflow_host_port }}:{{ taskflow_container_port }}"

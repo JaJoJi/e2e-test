@@ -821,6 +821,72 @@ NODE
         }
     }
 
+    stage('Terraform Plan') {
+        steps {
+            dir('infra/terraform') {
+                sh '''
+                    set -eu
+
+                    echo "=== Terraform Plan ==="
+
+                    TF_IMG="hashicorp/terraform:1.16.3"
+                    LS_IMG="localstack/localstack:3.8.1"
+                    BUCKET="taskflow-terraform-state"
+                    ENDPOINT="http://localstack:4566"
+
+                    # 1. Bootstrap/check the S3 backend bucket (idempotent).
+                    #    LocalStack dummy credentials ("test") match provider.tf.
+                    if docker run --rm --network jenkins --entrypoint awslocal \
+                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=us-east-1 \
+                        "${LS_IMG}" --endpoint-url="${ENDPOINT}" s3 ls "s3://${BUCKET}" > /dev/null 2>&1; then
+                        echo "Backend bucket s3://${BUCKET} already exists."
+                    else
+                        echo "Creating backend bucket s3://${BUCKET}..."
+                        docker run --rm --network jenkins --entrypoint awslocal \
+                            -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=us-east-1 \
+                            "${LS_IMG}" --endpoint-url="${ENDPOINT}" s3 mb "s3://${BUCKET}"
+                    fi
+
+                    # 2. Long-lived Terraform container. Sources are copied in
+                    #    via the Docker CLI because the agent workspace is not
+                    #    visible on the daemon host (same pattern as the OPA
+                    #    and Trivy stages). Cleanup trap never masks errors:
+                    #    the exit status is already fixed when it runs.
+                    TF_CTR="tf-plan-${BUILD_NUMBER:-$$}"
+                    cleanup() {
+                        docker rm -f "${TF_CTR}" > /dev/null
+                    }
+                    trap cleanup EXIT
+                    docker create --name "${TF_CTR}" --network jenkins --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
+                    docker start "${TF_CTR}" > /dev/null
+                    docker exec "${TF_CTR}" mkdir -p /work
+                    docker cp . "${TF_CTR}:/work/"
+
+                    # 3. Init (real S3 backend on LocalStack) and plan.
+                    #    No apply/destroy in this stage, ever.
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform init -input=false'
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform plan -input=false -out=tfplan'
+
+                    # 4. Bring the plan file back and prove it exists.
+                    docker cp "${TF_CTR}:/work/tfplan" ./tfplan
+                    test -f tfplan
+                    echo "=== tfplan verified ==="
+                    ls -lh tfplan
+                '''
+            }
+        }
+
+        post {
+            always {
+                archiveArtifacts(
+                    artifacts: 'infra/terraform/tfplan',
+                    fingerprint: true,
+                    allowEmptyArchive: false
+                )
+            }
+        }
+    }
+
     stage('Blue/Green Deploy') {
         steps {
             dir('mini-task-manager') {
