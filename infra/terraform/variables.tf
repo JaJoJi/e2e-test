@@ -1,13 +1,7 @@
 variable "aws_region" {
-  description = "AWS region name used for LocalStack calls."
+  description = "Kept for compatibility; unused by the Docker compute target."
   type        = string
-  default     = "us-east-1"
-}
-
-variable "localstack_endpoint" {
-  description = "LocalStack endpoint URL reachable from the Terraform runner."
-  type        = string
-  default     = "http://localstack:4566"
+  default     = "ap-southeast-1"
 }
 
 variable "app_port" {
@@ -16,20 +10,19 @@ variable "app_port" {
   default     = 8080
 }
 
-variable "app_allowed_cidr" {
-  description = "Restricted lab CIDR allowed to reach the application port. Never 0.0.0.0/0."
-  type        = string
-  default     = "10.0.0.0/8"
+variable "host_port" {
+  description = "Host-side published port mapped to the application port (host 8080 is taken by Jenkins on the lab daemon)."
+  type        = number
+  default     = 18080
 }
 
-variable "ami_id" {
-  description = "Mock AMI id accepted by LocalStack EC2 (no real image is launched in this lab)."
+variable "host_image" {
+  description = "Base Linux image for the provisioned compute container (pinned tag, never latest)."
   type        = string
-  default     = "ami-12345678"
+  default     = "ubuntu:22.04"
 }
 
-variable "instance_type" {
-  description = "EC2 instance type for the taskflow host."
+variable "ssh_public_key" {
+  description = "Public SSH key material installed for the Ansible user. No default: supply at runtime (e.g. from Jenkins credentials). The private half is never committed."
   type        = string
-  default     = "t3.micro"
 }

@@ -1,80 +1,61 @@
-# One compute instance behind one security group. The application port
-# (8080) is intentionally open only to a restricted lab CIDR, never to
-# 0.0.0.0/0.
+# Lab 08 compute target: a Docker container acting as the provisioned
+# host (replaces the AWS EC2 instance; LocalStack Community has no
+# Docker-backed EC2/SSH path).
 #
-# NOTE: metadata_options requires IMDSv2 (http_tokens = "required") and the
-# root volume is encrypted; both were triaged from tfsec/Checkov findings.
-resource "aws_security_group" "taskflow" {
-  name        = "taskflow-sg"
-  description = "Allow taskflow-api application traffic on port 8080"
-
-  ingress {
-    description = "taskflow-api application port"
-    from_port   = var.app_port
-    to_port     = var.app_port
-    protocol    = "tcp"
-    cidr_blocks = [var.app_allowed_cidr]
-  }
-
-  egress {
-    description = "Allow outbound traffic within the lab network only"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = [var.app_allowed_cidr]
-  }
-
-  tags = {
-    Name = "taskflow-sg"
-  }
+# SSH/sudo/package prerequisites are bootstrapped reproducibly via the
+# container command below (everything is visible here - no hidden image
+# layers): install openssh-server, sudo and python3, create the Ansible
+# user with the Terraform-provided public key and passwordless sudo,
+# then run sshd in the foreground. The runtime needs only `node`
+# equivalents plus sshd; the application itself is deployed later by
+# Ansible, not baked into this host image.
+resource "docker_image" "taskflow_host" {
+  name         = var.host_image
+  keep_locally = true
 }
 
-resource "aws_instance" "taskflow" {
-  ami                    = var.ami_id
-  instance_type          = var.instance_type
-  vpc_security_group_ids = [aws_security_group.taskflow.id]
-  monitoring             = true
-  ebs_optimized          = true
-  iam_instance_profile   = aws_iam_instance_profile.taskflow.name
+resource "docker_container" "taskflow" {
+  name     = "taskflow-lab08-host"
+  image    = docker_image.taskflow_host.image_id
+  hostname = "taskflow-lab08-host"
 
-  metadata_options {
-    http_endpoint = "enabled"
-    http_tokens   = "required"
+  # Privileged so the Docker daemon installed later by Ansible can run
+  # inside this host (Docker-in-Docker), matching the playbook duty to
+  # "enable/start Docker". The host Docker socket is NOT mounted here.
+  privileged = true
+
+  command = ["sh", "-c", <<-EOT
+    set -eu
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server sudo python3
+    useradd -m -s /bin/bash ubuntu
+    mkdir -p /home/ubuntu/.ssh
+    echo '${var.ssh_public_key}' > /home/ubuntu/.ssh/authorized_keys
+    chmod 700 /home/ubuntu/.ssh
+    chmod 600 /home/ubuntu/.ssh/authorized_keys
+    chown -R ubuntu:ubuntu /home/ubuntu/.ssh
+    echo 'ubuntu ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ubuntu
+    chmod 440 /etc/sudoers.d/ubuntu
+    mkdir -p /run/sshd
+    exec /usr/sbin/sshd -D
+  EOT
+  ]
+
+  networks_advanced {
+    name = docker_network.taskflow_lab08.name
   }
 
-  root_block_device {
-    encrypted = true
+  ports {
+    internal = 22
+    # No external publish: SSH stays inside the lab network only.
   }
 
-  tags = {
-    Name = "taskflow-api"
+  ports {
+    internal = 8080
+    # Host-side port is configurable because the daemon host may already
+    # use 8080 itself (e.g. Jenkins); the application port stays 8080.
+    external = var.host_port
   }
-}
 
-resource "aws_iam_role" "taskflow" {
-  name = "taskflow-ec2-role"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect    = "Allow"
-        Principal = { Service = "ec2.amazonaws.com" }
-        Action    = "sts:AssumeRole"
-      },
-    ]
-  })
-
-  tags = {
-    Name = "taskflow-ec2-role"
-  }
-}
-
-resource "aws_iam_instance_profile" "taskflow" {
-  name = "taskflow-ec2-profile"
-  role = aws_iam_role.taskflow.name
-
-  tags = {
-    Name = "taskflow-ec2-profile"
-  }
+  restart = "unless-stopped"
 }

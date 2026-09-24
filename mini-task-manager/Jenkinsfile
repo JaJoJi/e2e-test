@@ -824,6 +824,9 @@ NODE
     stage('Terraform Plan') {
         steps {
             dir('infra/terraform') {
+                // State backend is LocalStack S3, reached with dummy
+                // credentials (LocalStack convention, not real secrets).
+                // The Docker provider itself needs no cloud credentials.
                 sh '''
                     set -eu
 
@@ -835,7 +838,7 @@ NODE
                     ENDPOINT="http://localstack:4566"
 
                     # 1. Bootstrap/check the S3 backend bucket (idempotent).
-                    #    LocalStack dummy credentials ("test") match provider.tf.
+                    #    Credentials are injected from Jenkins (aws-lab08).
                     if docker run --rm --network jenkins --entrypoint awslocal \
                         -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=us-east-1 \
                         "${LS_IMG}" --endpoint-url="${ENDPOINT}" s3 ls "s3://${BUCKET}" > /dev/null 2>&1; then
@@ -857,12 +860,12 @@ NODE
                         docker rm -f "${TF_CTR}" > /dev/null
                     }
                     trap cleanup EXIT
-                    # LocalStack dummy credentials ("test") for the Terraform
-                    # AWS provider chain; EC2 metadata lookup is disabled so
-                    # the SDK never leaves the lab network. Not real secrets.
-                    docker create --name "${TF_CTR}" --network jenkins \
-                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
-                        -e AWS_DEFAULT_REGION=us-east-1 -e AWS_EC2_METADATA_DISABLED=true \
+                    # AWS credentials are injected from Jenkins (aws-lab08);
+                    # EC2 metadata lookup stays disabled so the SDK never
+                    # leaves the lab network. Not real secrets in this file.
+                    docker create --name "${TF_CTR}" --network jenkins -v /var/run/docker.sock:/var/run/docker.sock \
+                        -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+                        -e AWS_DEFAULT_REGION=ap-southeast-1 -e AWS_EC2_METADATA_DISABLED=true \
                         --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
                     docker start "${TF_CTR}" > /dev/null
                     docker exec "${TF_CTR}" mkdir -p /work
@@ -889,6 +892,149 @@ NODE
                     fingerprint: true,
                     allowEmptyArchive: false
                 )
+            }
+        }
+    }
+
+    stage('Approval') {
+        steps {
+            input message: '''Terraform Plan is ready for review.
+
+Review before proceeding:
+- tfplan artifact: infra/terraform/tfplan (archived in this build)
+- Terraform Plan console output (init / plan summary)
+- S3 backend bucket: taskflow-terraform-state (LocalStack)
+
+Proceed continues to Terraform Apply (upcoming stage) and the
+downstream deployment stages. Abort stops the pipeline here;
+nothing is applied automatically.''', ok: 'Proceed'
+        }
+    }
+
+    stage('Terraform Apply') {
+        steps {
+            dir('infra/terraform') {
+                // Same LocalStack backend credentials as the Plan stage.
+                sh '''
+                    set -eu
+
+                    echo "=== Terraform Apply ==="
+
+                    TF_IMG="hashicorp/terraform:1.16.3"
+
+                    # The saved plan from the Terraform Plan stage in THIS
+                    # build (same node, same workspace). Fail fast if absent.
+                    test -f tfplan
+                    echo "Found saved plan:"
+                    ls -lh tfplan
+
+                    # Same container pattern as the Plan stage: sources plus
+                    # the saved plan are copied in via the Docker CLI, with
+                    # AWS credentials injected from Jenkins (aws-lab08).
+                    TF_CTR="tf-apply-${BUILD_NUMBER:-$$}"
+                    cleanup() {
+                        docker rm -f "${TF_CTR}" > /dev/null
+                    }
+                    trap cleanup EXIT
+                    docker create --name "${TF_CTR}" --network jenkins -v /var/run/docker.sock:/var/run/docker.sock \
+                        -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+                        -e AWS_DEFAULT_REGION=ap-southeast-1 -e AWS_EC2_METADATA_DISABLED=true \
+                        --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
+                    docker start "${TF_CTR}" > /dev/null
+                    docker exec "${TF_CTR}" mkdir -p /work
+                    docker cp . "${TF_CTR}:/work/"
+
+                    # Re-init (same S3 backend on LocalStack), then apply ONLY
+                    # the approved saved plan. No auto-approval flag: the
+                    # manual Approval stage already gated this step.
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform init -input=false'
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform apply -input=false tfplan'
+
+                    echo "=== Terraform Apply finished ==="
+                '''
+            }
+        }
+    }
+
+    stage('Ansible Configure') {
+        steps {
+            dir('infra') {
+                // The SSH private key (SSH Username with private key
+                // credential id 'taskflow-ssh-key-file', username ubuntu)
+                // is materialized as a workspace temp file. Nothing secret
+                // is written in this file.
+                withCredentials([
+                sshUserPrivateKey(
+                    credentialsId: 'taskflow-ssh-key-file',
+                    keyFileVariable: 'SSH_KEY_FILE',
+                    usernameVariable: 'SSH_USERNAME'
+                )]) {
+                sh '''
+                    set -eu
+
+                    echo "=== Ansible Configure ==="
+
+                    TF_IMG="hashicorp/terraform:1.16.3"
+                    ANS_IMG="willhallonline/ansible:2.20.9-debian-trixie-slim"
+
+                    # 1. Read the SSH target from Terraform outputs.
+                    #    State lives in the LocalStack S3 backend (dummy
+                    #    credentials, LocalStack convention).
+                    TF_CTR="tf-out-${BUILD_NUMBER:-$$}"
+                    ANS_CTR="ansible-run-${BUILD_NUMBER:-$$}"
+                    cleanup() {
+                        docker rm -f "${TF_CTR}" "${ANS_CTR}" > /dev/null
+                        rm -f ansible-inventory.ini
+                    }
+                    trap cleanup EXIT
+                    docker create --name "${TF_CTR}" --network jenkins -v /var/run/docker.sock:/var/run/docker.sock \
+                        -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY \
+                        -e AWS_DEFAULT_REGION=ap-southeast-1 -e AWS_EC2_METADATA_DISABLED=true \
+                        --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
+                    docker start "${TF_CTR}" > /dev/null
+                    docker exec "${TF_CTR}" mkdir -p /work
+                    docker cp terraform/. "${TF_CTR}:/work/"
+                    INSTANCE_IP="$(docker exec "${TF_CTR}" sh -c 'cd /work && terraform init -input=false > /dev/null && terraform output -raw ssh_target')"
+
+                    # The target must be non-empty: fail loudly otherwise.
+                    if [ -z "${INSTANCE_IP}" ]; then
+                        echo "BLOCKER: Terraform output ssh_target is empty - no provisioned host for Ansible."
+                        exit 1
+                    fi
+                    echo "SSH target from Terraform: ${INSTANCE_IP}"
+
+                    # 2. Dynamic inventory from Terraform output (workspace
+                    #    temp file, removed by the trap). No hard-coded IPs,
+                    #    no passwords, no private keys in the repository.
+                    printf '[taskflow]\n%s ansible_user=%s\n' "${INSTANCE_IP}" "${SSH_USERNAME}" > ansible-inventory.ini
+
+                    # 3. Preload the immutable lab image into the target
+                    #    daemon (private images are not on Docker Hub; same
+                    #    pattern as kind load). The playbook then uses it
+                    #    with pull disabled.
+                    docker save "taskflow-api:${SHORT_SHA}" | docker exec -i "${INSTANCE_IP}" docker load
+
+                    # 4. Run the real playbook against the provisioned host,
+                    #    reached by container name over the lab network.
+                    #    The SSH private key comes from the Jenkins 'Secret
+                    #    file' credential (taskflow-ssh-key-file) and is
+                    #    copied into the container only; it never lives in
+                    #    the repository. Non-interactive host-key handling is
+                    #    standard CI practice for ephemeral lab hosts.
+                    docker create --name "${ANS_CTR}" --network taskflow-lab08 \
+                        -e ANSIBLE_HOST_KEY_CHECKING=false \
+                        --entrypoint sh "${ANS_IMG}" -c 'sleep 600' > /dev/null
+                    docker start "${ANS_CTR}" > /dev/null
+                    docker exec "${ANS_CTR}" mkdir -p /work
+                    docker cp ansible/. "${ANS_CTR}:/work/ansible/"
+                    docker cp ansible-inventory.ini "${ANS_CTR}:/work/ansible-inventory.ini"
+                    docker cp "${SSH_KEY_FILE}" "${ANS_CTR}:/tmp/ssh_key"
+                    docker exec "${ANS_CTR}" chmod 600 /tmp/ssh_key
+                    docker exec "${ANS_CTR}" sh -c 'cd /work && ansible-playbook -i ansible-inventory.ini ansible/playbook.yml -e target_hosts=taskflow -e taskflow_image_tag='"${SHORT_SHA}"' -e ansible_user='"${SSH_USERNAME}"' -e ansible_ssh_private_key_file=/tmp/ssh_key'
+
+                    echo "=== Ansible Configure finished ==="
+                '''
+                }
             }
         }
     }

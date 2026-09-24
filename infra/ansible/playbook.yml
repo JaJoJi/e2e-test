@@ -21,18 +21,48 @@
         name: docker.io
         state: present
 
+    - name: Install Python libraries required by Docker modules
+      ansible.builtin.apt:
+        name:
+          - python3-requests
+          - python3-docker
+        state: present
+
     - name: Ensure Docker service is running
       ansible.builtin.service:
         name: docker
         state: started
         enabled: true
+      when: ansible_service_mgr == "systemd"
 
-    - name: Pull taskflow-api image with immutable tag
+    - name: Start Docker daemon directly on hosts without systemd
+      # vfs storage driver: nested overlay filesystems cannot apply
+      # whiteout layers, so the inner daemon must use vfs.
+      ansible.builtin.shell:
+        cmd: (dockerd -s vfs > /tmp/dockerd.log 2>&1 &)
+        creates: /var/run/docker.sock
+      when: ansible_service_mgr != "systemd"
+
+    - name: Wait for Docker daemon to accept commands
+      ansible.builtin.command: docker info
+      register: docker_info
+      until: docker_info.rc == 0
+      retries: 12
+      delay: 5
+      changed_when: false
+      when: ansible_service_mgr != "systemd"
+
+    - name: Run taskflow-api image with immutable tag
+      # pull: false because private lab images are preloaded into the
+      # target daemon by the delivery pipeline (same pattern as kind load);
+      # they do not exist on Docker Hub.
       community.docker.docker_container:
         name: taskflow-api
         image: "{{ taskflow_image_repo }}:{{ taskflow_image_tag }}"
-        pull: true
+        pull: false
         state: started
         restart_policy: unless-stopped
+        env:
+          PORT: "{{ taskflow_container_port | string }}"
         ports:
           - "{{ taskflow_host_port }}:{{ taskflow_container_port }}"
