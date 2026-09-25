@@ -1098,7 +1098,7 @@ if ok:
 else:
     print('"'"'ERROR: SSH never became reachable'"'"')
 sys.exit(0 if ok else 1)
-" check '"${INSTANCE_IP}"''
+" '"${INSTANCE_IP}"''
                     docker cp "${SSH_KEY_FILE}" "${ANS_CTR}:/tmp/ssh_key"
                     docker exec "${ANS_CTR}" chmod 600 /tmp/ssh_key
                     # Log only the key fingerprint (never the key itself) so
