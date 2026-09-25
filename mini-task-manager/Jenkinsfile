@@ -37,6 +37,9 @@ stages {
     stage('Checkout') {
         steps {
             checkout scm
+            // Share sources with Kubernetes-agent stages (their pods have
+            // no git client). Never stash node_modules or build outputs.
+            stash includes: 'mini-task-manager/**', excludes: 'mini-task-manager/node_modules/**, mini-task-manager/coverage/**, mini-task-manager/test-results/**, mini-task-manager/e2e/playwright-report/**, mini-task-manager/e2e/test-results/**', name: 'app-sources'
         }
     }
 
@@ -731,52 +734,80 @@ NODE
     }
 
     stage('Install') {
+        agent {
+            label 'k8s-node'
+        }
         steps {
+            // Fresh ephemeral pod: restore sources (no git client here).
+            unstash 'app-sources'
             dir('mini-task-manager') {
-                sh '''
-                    set -eu
+                container('node') {
+                    sh '''
+                        set -eu
 
-                    echo "=== Environment ==="
-                    node --version
-                    npm --version
-                    docker --version
-                    docker compose version
+                        echo "=== Environment ==="
+                        node --version
+                        npm --version
 
-                    echo "=== Install Dependencies ==="
-                    npm ci
-                '''
+                        echo "=== Install Dependencies ==="
+                        npm ci
+                    '''
+                }
             }
         }
     }
 
     stage('Lint') {
+        agent {
+            label 'k8s-node'
+        }
         steps {
+            // Fresh ephemeral pod: restore sources and install locally.
+            unstash 'app-sources'
             dir('mini-task-manager') {
-                sh '''
-                    set -eu
+                container('node') {
+                    sh '''
+                        set -eu
 
-                    echo "=== ESLint ==="
-                    npm run lint
-                '''
+                        echo "=== Install Dependencies ==="
+                        npm ci
+
+                        echo "=== ESLint ==="
+                        npm run lint
+                    '''
+                }
             }
         }
     }
 
     stage('Unit Test') {
+        agent {
+            label 'k8s-node'
+        }
         steps {
+            // Fresh ephemeral pod: restore sources and install locally.
+            unstash 'app-sources'
             dir('mini-task-manager') {
-                sh '''
-                    set -eu
+                container('node') {
+                    sh '''
+                        set -eu
 
-                    echo "=== Unit Test + Coverage ==="
+                        echo "=== Install Dependencies ==="
+                        npm ci
 
-                    npm test -- --coverage
+                        echo "=== Unit Test + Coverage ==="
 
-                    echo "=== Unit Test Reports ==="
-                    ls -lh test-results/
-                    ls -lh coverage/
-                '''
+                        npm test -- --coverage
+
+                        echo "=== Unit Test Reports ==="
+                        ls -lh test-results/
+                        ls -lh coverage/
+                    '''
+                }
             }
+            // Share the coverage report with SonarQube Analysis, which
+            // runs on linux-build.
+            stash includes: 'mini-task-manager/coverage/lcov.info', name: 'sonar-coverage'
         }
 
         post {
@@ -807,6 +838,8 @@ NODE
 
     stage('SonarQube Analysis') {
         steps {
+            // Coverage is produced by Unit Test on the Kubernetes agent.
+            unstash 'sonar-coverage'
             dir('mini-task-manager') {
                 script {
                     def scannerHome = tool 'SonarScanner'
