@@ -1074,6 +1074,31 @@ nothing is applied automatically.''', ok: 'Proceed'
                     docker exec "${ANS_CTR}" mkdir -p /work
                     docker cp ansible/. "${ANS_CTR}:/work/ansible/"
                     docker cp ansible-inventory.ini "${ANS_CTR}:/work/ansible-inventory.ini"
+                    # Wait for SSH to accept connections: a fresh container
+                    # bootstraps sshd via apt, which takes a minute or more.
+                    # The target host travels as argv (quoting-safe); fail
+                    # loudly on timeout.
+                    docker exec "${ANS_CTR}" sh -c 'python3 -c "import socket,sys,time
+host=sys.argv[1]
+deadline=time.time()+180
+ok=0
+while time.time()<deadline and not ok:
+    s=socket.socket()
+    s.settimeout(5)
+    try:
+        if s.connect_ex((host,22))==0:
+            ok=1
+    except OSError:
+        pass
+    s.close()
+    if not ok:
+        time.sleep(5)
+if ok:
+    print('"'"'SSH reachable'"'"')
+else:
+    print('"'"'ERROR: SSH never became reachable'"'"')
+sys.exit(0 if ok else 1)
+" check '"${INSTANCE_IP}"''
                     docker cp "${SSH_KEY_FILE}" "${ANS_CTR}:/tmp/ssh_key"
                     docker exec "${ANS_CTR}" chmod 600 /tmp/ssh_key
                     # Log only the key fingerprint (never the key itself) so
