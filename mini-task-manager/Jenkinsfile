@@ -1444,8 +1444,12 @@ sys.exit(0 if ok else 1)
                     # 2. Jenkins history for THIS multibranch job/branch only.
                     #    Anonymous read is sufficient on this controller; no
                     #    credentials or tokens are used or logged.
+                    #    NOTE: ${JENKINS_URL} points at localhost, which from an
+                    #    agent container means the agent itself. Rewrite it to
+                    #    the controller DNS name reachable on the lab network.
+                    JENKINS_AGENT_URL="$(echo "${JENKINS_URL}" | sed -e 's|^http://localhost:8080|http://jenkins:8080|' -e 's|^http://127.0.0.1:8080|http://jenkins:8080|')"
                     API_JOB_PATH="$(echo "${JOB_NAME}" | sed 's|/|/job/|g')"
-                    HISTORY_URL="${JENKINS_URL}job/${API_JOB_PATH}/api/json?tree=builds[number,result]{0,21}"
+                    HISTORY_URL="${JENKINS_AGENT_URL}job/${API_JOB_PATH}/api/json?tree=builds[number,result]{0,21}"
                     echo "History source: ${HISTORY_URL}"
                     curl -s -m 20 "${HISTORY_URL}" > health-history.json
                     test -s health-history.json
