@@ -8,7 +8,15 @@ options {
     disableConcurrentBuilds()
     skipDefaultCheckout(true)
     buildDiscarder(logRotator(numToKeepStr: '20'))
-    timeout(time: 15, unit: 'MINUTES')
+    timeout(time: 60, unit: 'MINUTES')
+}
+
+parameters {
+    booleanParam(
+        name: 'LAB08_DESTROY',
+        defaultValue: false,
+        description: 'Lab 08 evidence cleanup only: when true, destroy Lab 08 Terraform infrastructure after deployment stages and verify remote state is empty. Normal builds leave this false.'
+    )
 }
 
 environment {
@@ -29,121 +37,781 @@ stages {
     stage('Checkout') {
         steps {
             checkout scm
+            // Share sources with Kubernetes-agent stages (their pods have
+            // no git client). Never stash node_modules or build outputs.
+            stash includes: 'mini-task-manager/**', excludes: 'mini-task-manager/node_modules/**, mini-task-manager/coverage/**, mini-task-manager/test-results/**, mini-task-manager/e2e/playwright-report/**, mini-task-manager/e2e/test-results/**', name: 'app-sources'
         }
     }
 
-    stage('Secrets Detection — Gitleaks') {
-        steps {
-        sh '''
-        set -eu
+    stage('Quality Gates') {
+        parallel {
+            stage('Secrets Detection — Gitleaks') {
+                steps {
+                sh '''
+                set -eu
 
-                echo "=== Gitleaks Secrets Detection ==="
-                echo "Scanning full Git history..."
+                        echo "=== Gitleaks Secrets Detection ==="
+                        echo "Scanning full Git history..."
 
-                CONTAINER="gitleaks-${BUILD_NUMBER}"
+                        CONTAINER="gitleaks-${BUILD_NUMBER}"
 
-                echo "=== Create Gitleaks Container ==="
+                        echo "=== Create Gitleaks Container ==="
 
-                docker create \
-                    --name "$CONTAINER" \
-                    zricethezav/gitleaks:latest \
-                    detect \
-                    --source=/repo \
-                    --redact \
-                    --report-format sarif \
-                    --report-path=/repo/gitleaks.sarif
+                        docker create \
+                            --name "$CONTAINER" \
+                            zricethezav/gitleaks:latest \
+                            detect \
+                            --source=/repo \
+                            --redact \
+                            --report-format sarif \
+                            --report-path=/repo/gitleaks.sarif
 
-                echo "=== Copy Jenkins Workspace into Container ==="
+                        echo "=== Copy Jenkins Workspace into Container ==="
 
-                docker cp . "$CONTAINER:/repo"
+                        docker cp . "$CONTAINER:/repo"
 
-                echo "=== Run Gitleaks ==="
+                        echo "=== Run Gitleaks ==="
 
-                set +e
-                docker start -a "$CONTAINER"
-                GITLEAKS_EXIT=$?
-                set -e
+                        set +e
+                        docker start -a "$CONTAINER"
+                        GITLEAKS_EXIT=$?
+                        set -e
 
-                echo "=== Copy Gitleaks Report ==="
+                        echo "=== Copy Gitleaks Report ==="
 
-                docker cp \
-                    "$CONTAINER:/repo/gitleaks.sarif" \
-                    ./gitleaks.sarif
+                        docker cp \
+                            "$CONTAINER:/repo/gitleaks.sarif" \
+                            ./gitleaks.sarif
 
-                echo "=== Gitleaks Report ==="
-                ls -lh gitleaks.sarif
+                        echo "=== Gitleaks Report ==="
+                        ls -lh gitleaks.sarif
 
-                echo "=== Cleanup Gitleaks Container ==="
-                docker rm "$CONTAINER" >/dev/null
+                        echo "=== Cleanup Gitleaks Container ==="
+                        docker rm "$CONTAINER" >/dev/null
 
-                if [ "$GITLEAKS_EXIT" -ne 0 ]; then
-                    echo "Gitleaks detected secrets or failed."
-                    exit "$GITLEAKS_EXIT"
-                fi
+                        if [ "$GITLEAKS_EXIT" -ne 0 ]; then
+                            echo "Gitleaks detected secrets or failed."
+                            exit "$GITLEAKS_EXIT"
+                        fi
 
-                echo "Gitleaks passed."
-            '''
+                        echo "Gitleaks passed."
+                    '''
+                }
+
+                post {
+                    always {
+                        archiveArtifacts(
+                            artifacts: 'gitleaks.sarif',
+                            fingerprint: true,
+                            allowEmptyArchive: true
+                        )
+                    }
+                }
+
+                }
+
+            stage('SAST — ESLint Security') {
+                steps {
+                    dir('mini-task-manager') {
+                        sh '''
+                            set -eu
+
+                            echo "=== Install dependencies for SAST ==="
+                            npm ci --no-audit --no-fund
+
+                            echo "=== ESLint Security Scan ==="
+
+                            npx eslint \
+                                --plugin security \
+                                --format @microsoft/eslint-formatter-sarif \
+                                --output-file eslint-security.sarif \
+                                src/
+
+                            echo "=== SARIF Report ==="
+                            ls -lh eslint-security.sarif
+
+                            RESULTS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('./eslint-security.sarif','utf8')).runs[0].results.length)")
+                            echo "ESLint Security findings: $RESULTS"
+                        '''
+                    }
+                }
+
+                post {
+                    always {
+                        dir('mini-task-manager') {
+                            archiveArtifacts(
+                                artifacts: 'eslint-security.sarif',
+                                fingerprint: true,
+                                allowEmptyArchive: true
+                            )
+                        }
+                    }
+                }
+            }
+
+            stage('SAST — Semgrep') {
+                steps {
+                    dir('mini-task-manager') {
+                        sh '''
+                            set -eu
+
+                            echo "=== Semgrep SAST (p/owasp-top-ten + p/nodejs) ==="
+
+                            CONTAINER="semgrep-${BUILD_NUMBER}"
+
+                            echo "=== Create Semgrep container ==="
+                            docker create \
+                                --name "$CONTAINER" \
+                                semgrep/semgrep:latest \
+                                semgrep \
+                                    --config p/owasp-top-ten \
+                                    --config p/nodejs \
+                                    --sarif \
+                                    --output /repo/semgrep.sarif \
+                                    --no-git-ignore \
+                                    /repo/src
+
+                            echo "=== Copy workspace into container ==="
+                            docker cp . "$CONTAINER:/repo"
+
+                            echo "=== Run Semgrep ==="
+                            set +e
+                            docker start -a "$CONTAINER"
+                            SEMGREP_EXIT=$?
+                            set -e
+
+                            echo "Semgrep exit code: $SEMGREP_EXIT"
+
+                            echo "=== Copy report out ==="
+                            docker cp "$CONTAINER:/repo/semgrep.sarif" ./semgrep.sarif 2>/dev/null || true
+
+                            echo "=== Cleanup ==="
+                            docker rm "$CONTAINER" >/dev/null 2>&1 || true
+
+                            if [ "$SEMGREP_EXIT" -ne 0 ]; then
+                                echo "Semgrep scan failed (exit $SEMGREP_EXIT)"
+                                exit "$SEMGREP_EXIT"
+                            fi
+
+                            echo "=== Report ==="
+                            ls -lh semgrep.sarif
+
+                            RESULTS=$(node -e "console.log(JSON.parse(require('fs').readFileSync('./semgrep.sarif','utf8')).runs[0].results.length)")
+                            echo "Semgrep findings: $RESULTS"
+
+                            echo "=== NOTE: WARNING-level findings do not fail this stage. ==="
+                            echo "===       Fail/warn threshold is handled by future policy work. ==="
+                        '''
+                    }
+                }
+
+                post {
+                    always {
+                        dir('mini-task-manager') {
+                            archiveArtifacts(
+                                artifacts: 'semgrep.sarif',
+                                fingerprint: true,
+                                allowEmptyArchive: true
+                            )
+                        }
+                    }
+                }
+            }
+
+            stage('SCA — npm audit') {
+                steps {
+                    dir('mini-task-manager') {
+                        sh '''
+                            set -eu
+
+                            echo "=== SCA — npm audit ==="
+
+                            # Run npm audit and ALWAYS capture the JSON, regardless of exit code.
+                            # Fail/warn policy is decided in this stage, not by npm's own exit code.
+                            set +e
+                            npm audit --audit-level=high --json > audit.json 2>audit.stderr
+                            AUDIT_EXIT=$?
+                            set -e
+                            echo "npm audit raw exit code: ${AUDIT_EXIT}"
+
+                            if [ ! -s audit.json ]; then
+                                echo "ERROR: audit.json was not produced"
+                                cat audit.stderr || true
+                                exit 1
+                            fi
+
+                            echo "=== Vulnerability Counts ==="
+                            node <<'NODE'
+        const fs = require('fs');
+
+        const a = JSON.parse(fs.readFileSync('audit.json', 'utf8'));
+        const m = (a.metadata && a.metadata.vulnerabilities) || {};
+
+        const c = m.critical || 0;
+        const h = m.high || 0;
+        const mo = m.moderate || 0;
+        const l = m.low || 0;
+        const i = m.info || 0;
+        const t = m.total || 0;
+
+        console.log('critical  = ' + c);
+        console.log('high      = ' + h);
+        console.log('moderate  = ' + mo);
+        console.log('low       = ' + l);
+        console.log('info      = ' + i);
+        console.log('total     = ' + t);
+
+        if (c > 0) {
+          console.error('Blocking: ' + c + ' critical vulnerabilities found');
+          process.exit(10);
         }
 
-        post {
-            always {
-                archiveArtifacts(
-                    artifacts: 'gitleaks.sarif',
-                    fingerprint: true,
-                    allowEmptyArchive: true
-                )
+        if (h > 0) {
+          console.warn('WARNING: ' + h + ' high vulnerabilities found');
+        }
+
+        if (mo > 0) {
+          console.warn('INFO: ' + mo + ' moderate vulnerabilities');
+        }
+
+        if (l > 0) {
+          console.warn('INFO: ' + l + ' low vulnerabilities');
+        }
+
+        if (i > 0) {
+          console.log('INFO: ' + i + ' informational items');
+        }
+
+        console.log('SCA passed: 0 critical vulnerabilities');
+        NODE
+                        '''
+                    }
+                }
+
+                post {
+                    always {
+                        dir('mini-task-manager') {
+                            archiveArtifacts(
+                                artifacts: 'audit.json',
+                                fingerprint: true,
+                                allowEmptyArchive: true
+                            )
+                        }
+                    }
+                }
             }
         }
+    }
 
-        }
-
-    stage('Install') {
+    stage('SBOM — Syft + Cosign') {
         steps {
             dir('mini-task-manager') {
                 sh '''
                     set -eu
 
-                    echo "=== Environment ==="
-                    node --version
-                    npm --version
-                    docker --version
-                    docker compose version
+                    echo "=== SBOM — Syft + Cosign ==="
 
-                    echo "=== Install Dependencies ==="
-                    npm ci
+                    SBOM="taskflow-api.cdx.json"
+                    SBOM_IMAGE="mtm-sbom-scan:tmp"
+                    KEYDIR=".sbom-keys"
+                    COSIGN_IMAGE="gcr.io/projectsigstore/cosign:v2.4.1"
+                    SYFT_IMAGE="anchore/syft:latest"
+
+                    # Per-build random password; do NOT log it.
+                    export COSIGN_PASSWORD
+                    COSIGN_PASSWORD="lab06-$(date +%s)-$(head -c 16 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9')"
+                    echo "Generated per-build COSIGN_PASSWORD (length=${#COSIGN_PASSWORD}), not logged"
+
+                    # Safety net: wipe keydir on any exit (success, failure, interrupt).
+                    cleanup() {
+                        rm -rf "$KEYDIR" 2>/dev/null || true
+                        unset COSIGN_PASSWORD || true
+                    }
+                    trap cleanup EXIT
+
+                    # ------------------------------------------------------------------
+                    # 1. Build the SBOM scan image (production-only deps, matches
+                    #    the same image the Deploy — Staging stage will run later).
+                    # ------------------------------------------------------------------
+                    echo "=== Build SBOM scan image ==="
+                    docker build -t "$SBOM_IMAGE" -f Dockerfile .
+
+                    # ------------------------------------------------------------------
+                    # 2. Generate CycloneDX SBOM by scanning the built image.
+                    #    We scan the IMAGE rather than the source directory because
+                    #    Syft's `dir:` source mode currently produces 0 components
+                    #    for npm-only projects; scanning the built image yields the
+                    #    real production dependency tree (660 components, 279 npm).
+                    # ------------------------------------------------------------------
+                    echo "=== Generate SBOM (CycloneDX) ==="
+                    SBOM_CTR="sbom-gen-${BUILD_NUMBER:-$$}"
+                    docker create --name "$SBOM_CTR" \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        "$SYFT_IMAGE" \
+                        scan "docker:$SBOM_IMAGE" -o cyclonedx-json > /dev/null
+                    docker start -a "$SBOM_CTR" > "$SBOM" 2>/dev/null
+                    SBOM_EXIT=$?
+                    docker rm "$SBOM_CTR" > /dev/null 2>&1 || true
+                    unset SBOM_CTR
+                    if [ "$SBOM_EXIT" -ne 0 ] || [ ! -s "$SBOM" ]; then
+                        echo "ERROR: Syft scan failed (exit $SBOM_EXIT)"
+                        exit 1
+                    fi
+
+                    # Validate SBOM and report component count.
+                    node -e "
+                        const j = JSON.parse(require('fs').readFileSync('$SBOM','utf8'));
+                        const n = (j.components||[]).length;
+                        if (j.bomFormat !== 'CycloneDX') {
+                            console.error('ERROR: SBOM is not CycloneDX (got: ' + j.bomFormat + ')');
+                            process.exit(1);
+                        }
+                        console.log('SBOM format      : ' + j.bomFormat);
+                        console.log('SBOM specVersion : ' + j.specVersion);
+                        console.log('SBOM components  : ' + n);
+                    "
+
+                    # ------------------------------------------------------------------
+                    # 3. Generate ephemeral Cosign keypair.  The private key lives
+                    #    only inside the container's overlay; we copy it to a
+                    #    workspace-local $KEYDIR for the next steps, then `trap`
+                    #    deletes $KEYDIR.  We never archive $KEYDIR.
+                    # ------------------------------------------------------------------
+                    echo "=== Generate ephemeral Cosign keypair ==="
+                    mkdir -p "$KEYDIR"
+                    KG_CTR="cosign-keygen-${BUILD_NUMBER:-$$}"
+                    docker create --name "$KG_CTR" \
+                        -u 0:0 \
+                        -e "COSIGN_PASSWORD=$COSIGN_PASSWORD" \
+                        "$COSIGN_IMAGE" \
+                        generate-key-pair --output-key-prefix /home/nonroot/cosign > /dev/null
+                    docker start -a "$KG_CTR" > /dev/null 2>&1
+                    docker cp "$KG_CTR:/home/nonroot/cosign.pub" "$KEYDIR/cosign.pub" || { echo "ERROR: cp cosign.pub failed"; exit 1; }
+                    docker cp "$KG_CTR:/home/nonroot/cosign.key" "$KEYDIR/cosign.key" || { echo "ERROR: cp cosign.key failed"; exit 1; }
+                    docker rm "$KG_CTR" > /dev/null 2>&1 || true
+                    unset KG_CTR
+                    if [ ! -s "$KEYDIR/cosign.key" ] || [ ! -s "$KEYDIR/cosign.pub" ]; then
+                        echo "ERROR: keypair was not produced"
+                        exit 1
+                    fi
+                    # Promote public key out of KEYDIR so it survives trap cleanup.
+                    cp "$KEYDIR/cosign.pub" ./cosign.pub
+
+                    # ------------------------------------------------------------------
+                    # 4. Sign the SBOM with the ephemeral private key.
+                    # ------------------------------------------------------------------
+                    echo "=== Sign SBOM ==="
+                    SG_CTR="cosign-sign-${BUILD_NUMBER:-$$}"
+                    docker create --name "$SG_CTR" \
+                        -u 0:0 \
+                        -e "COSIGN_PASSWORD=$COSIGN_PASSWORD" \
+                        "$COSIGN_IMAGE" \
+                        sign-blob \
+                            --key /home/nonroot/cosign.key \
+                            --output-signature /home/nonroot/${SBOM}.sig \
+                            --yes \
+                            /home/nonroot/$SBOM > /dev/null
+                    docker cp "$SBOM"                "$SG_CTR:/home/nonroot/$SBOM"
+                    docker cp "$KEYDIR/cosign.key"   "$SG_CTR:/home/nonroot/cosign.key"
+                    docker start -a "$SG_CTR" > /dev/null 2>&1
+                    docker cp "$SG_CTR:/home/nonroot/${SBOM}.sig" "./${SBOM}.sig" || { echo "ERROR: cp signature failed"; exit 1; }
+                    docker rm "$SG_CTR" > /dev/null 2>&1 || true
+                    unset SG_CTR
+                    if [ ! -s "${SBOM}.sig" ]; then
+                        echo "ERROR: SBOM signature was not produced"
+                        exit 1
+                    fi
+
+                    # ------------------------------------------------------------------
+                    # 5. Verify the signature using ONLY the public key (which is
+                    #    archived as a build artifact).  Exit code 0 = verified.
+                    # ------------------------------------------------------------------
+                    echo "=== Verify SBOM signature ==="
+                    VR_CTR="cosign-verify-${BUILD_NUMBER:-$$}"
+                    docker create --name "$VR_CTR" \
+                        -u 0:0 \
+                        "$COSIGN_IMAGE" \
+                        verify-blob \
+                            --key /home/nonroot/cosign.pub \
+                            --signature /home/nonroot/${SBOM}.sig \
+                            /home/nonroot/$SBOM > /dev/null
+                    docker cp "$SBOM"           "$VR_CTR:/home/nonroot/$SBOM"
+                    docker cp "${SBOM}.sig"      "$VR_CTR:/home/nonroot/${SBOM}.sig"
+                    docker cp cosign.pub         "$VR_CTR:/home/nonroot/cosign.pub"
+                    docker start -a "$VR_CTR"
+                    VERIFY_EXIT=$?
+                    docker rm "$VR_CTR" > /dev/null 2>&1 || true
+                    unset VR_CTR
+                    if [ "$VERIFY_EXIT" -ne 0 ]; then
+                        echo "ERROR: Cosign signature verification FAILED (exit $VERIFY_EXIT)"
+                        exit 1
+                    fi
+                    echo "=== SBOM + signature VERIFIED ==="
+
+                    echo "=== Final SBOM component count ==="
+                    node -e "console.log((JSON.parse(require('fs').readFileSync('$SBOM','utf8')).components||[]).length + ' components')"
                 '''
+            }
+        }
+
+        post {
+            always {
+                dir('mini-task-manager') {
+                    // Safety net: ensure the ephemeral private key dir is gone
+                    // even if the stage skipped cleanup (e.g. JVM abort).
+                    sh 'rm -rf .sbom-keys || true'
+
+                    // Archive ONLY the public material.  Never archive cosign.key.
+                    archiveArtifacts(
+                        artifacts: 'taskflow-api.cdx.json,taskflow-api.cdx.json.sig,cosign.pub',
+                        fingerprint: true,
+                        allowEmptyArchive: false
+                    )
+                }
+            }
+        }
+    }
+
+    stage('Policy Gate — OPA') {
+        steps {
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
+
+                    echo "=== Policy Gate — OPA ==="
+
+                    AUDIT="audit.json"
+                    POLICY_DIR="policy"
+                    POLICY_FILE="policy/security.rego"
+                    OPA_IMAGE="openpolicyagent/opa:latest"
+
+                    # 1. Preconditions: both the SCA output and the Rego policy must exist.
+                    if [ ! -s "$AUDIT" ]; then
+                        echo "ERROR: $AUDIT not found. SCA stage must run first."
+                        exit 1
+                    fi
+                    if [ ! -s "$POLICY_FILE" ]; then
+                        echo "ERROR: $POLICY_FILE not found."
+                        exit 1
+                    fi
+
+                    # 2. Echo vulnerability summary so the log shows what OPA is judging.
+                    node -e "
+                        const fs = require('fs');
+                        const a = JSON.parse(fs.readFileSync('$AUDIT','utf8'));
+                        const v = (a.metadata && a.metadata.vulnerabilities) || {};
+                        console.log('vulnerability counts (from $AUDIT):');
+                        console.log('  critical = ' + (v.critical || 0));
+                        console.log('  high     = ' + (v.high     || 0));
+                        console.log('  moderate = ' + (v.moderate || 0));
+                        console.log('  low      = ' + (v.low      || 0));
+                        console.log('  info     = ' + (v.info     || 0));
+                    "
+
+                    # 3. Run OPA on the audit.json input via docker create/cp/start/cp/rm.
+                    #    Two queries: `allow` (boolean decision) and `deny` (reason msgs).
+                    echo "=== OPA eval (data.security.allow) ==="
+                    ALLOW_CTR="opa-allow-${BUILD_NUMBER:-$$}"
+                    docker create --name "$ALLOW_CTR" \
+                        "$OPA_IMAGE" \
+                        eval -d /policy -i /audit.json "data.security.allow" > /dev/null
+                    docker cp "$AUDIT"     "$ALLOW_CTR:/audit.json"
+                    docker cp "$POLICY_DIR" "$ALLOW_CTR:/policy"
+                    docker start -a "$ALLOW_CTR" > /tmp/opa-allow.json 2>&1
+                    docker rm "$ALLOW_CTR" > /dev/null 2>&1 || true
+                    unset ALLOW_CTR
+
+                    echo "=== OPA eval (data.security.deny) ==="
+                    DENY_CTR="opa-deny-${BUILD_NUMBER:-$$}"
+                    docker create --name "$DENY_CTR" \
+                        "$OPA_IMAGE" \
+                        eval -d /policy -i /audit.json "data.security.deny" > /dev/null
+                    docker cp "$AUDIT"     "$DENY_CTR:/audit.json"
+                    docker cp "$POLICY_DIR" "$DENY_CTR:/policy"
+                    docker start -a "$DENY_CTR" > /tmp/opa-deny.json 2>&1
+                    docker rm "$DENY_CTR" > /dev/null 2>&1 || true
+                    unset DENY_CTR
+
+                    # 4. Parse the OPA JSON output and decide.
+                    ALLOW=$(node -e "
+                        const j = JSON.parse(require('fs').readFileSync('/tmp/opa-allow.json','utf8'));
+                        process.stdout.write(String(j.result[0].expressions[0].value));
+                    ")
+                    DENY_RAW=$(node -e "
+                        const j = JSON.parse(require('fs').readFileSync('/tmp/opa-deny.json','utf8'));
+                        const v = j.result[0].expressions[0].value;
+                        process.stdout.write(JSON.stringify(v));
+                    ")
+
+                    echo ""
+                    echo "=== OPA Policy Decision ==="
+                    if [ "$ALLOW" = "true" ]; then
+                        echo "OPA Policy Decision: ALLOW"
+                        echo "Policy Gate passed: 0 critical vulnerabilities"
+                    else
+                        echo "OPA Policy Decision: DENY"
+                        echo "Reason(s):"
+                        # Print each deny message on its own line.
+                        echo "$DENY_RAW" | node -e "
+                            let raw = '';
+                            process.stdin.on('data', d => raw += d);
+                            process.stdin.on('end', () => {
+                                const v = JSON.parse(raw);
+                                if (Array.isArray(v)) {
+                                    for (const m of v) console.log('  - ' + m);
+                                } else {
+                                    console.log('  - DENY');
+                                }
+                            });
+                        "
+                        echo ""
+                        echo "Policy Gate FAILED."
+                        exit 1
+                    fi
+                '''
+            }
+        }
+    }
+
+    stage('Build Image') {
+        steps {
+            dir('mini-task-manager') {
+                script {
+                    env.SHORT_SHA = env.GIT_COMMIT.take(7)
+                }
+                sh '''
+                    set -eu
+
+                    echo "=== Build Image ==="
+
+                    IMAGE="taskflow-api:${SHORT_SHA}"
+                    REGISTRY_IMAGE="localhost:5000/taskflow-api:${SHORT_SHA}"
+
+                    echo "Image:          ${IMAGE}"
+                    echo "Registry image: ${REGISTRY_IMAGE}"
+
+                    # Tag must be the 7-character Git short SHA.
+                    echo "${SHORT_SHA}" | grep -Eq '^[0-9a-f]{7}$'
+
+                    # 1. Ensure the local registry (registry:2) is running.
+                    #    Idempotent: reuse the existing container when present.
+                    if [ -z "$(docker ps -q -f 'name=^local-registry$')" ]; then
+                        if [ -n "$(docker ps -aq -f 'name=^local-registry$')" ]; then
+                            echo "Starting existing local-registry container..."
+                            docker start local-registry
+                        else
+                            echo "Creating local registry (registry:2)..."
+                            docker run -d --name local-registry --restart unless-stopped -p 5000:5000 registry:2
+                        fi
+                    else
+                        echo "Local registry already running."
+                    fi
+
+                    # 2. Build the image from mini-task-manager/Dockerfile.
+                    #    --pull ensures a fresh base image so OS fixes apply.
+                    #    Any failure here fails the pipeline (no error masking).
+                    docker build --pull -t "${IMAGE}" -f Dockerfile .
+
+                    # 3. Tag for the local registry and push.
+                    docker tag "${IMAGE}" "${REGISTRY_IMAGE}"
+                    docker push "${REGISTRY_IMAGE}"
+
+                    # 4. Verify the push: drop the local registry-tagged copy
+                    #    and pull it back. Pull succeeds only if the push landed.
+                    docker rmi "${REGISTRY_IMAGE}"
+                    docker pull "${REGISTRY_IMAGE}"
+
+                    echo "=== Build + Push verified ==="
+                    docker images "localhost:5000/taskflow-api" --format '{{.Repository}}:{{.Tag}}'
+                '''
+            }
+        }
+    }
+
+    stage('Container Scan — Trivy') {
+        steps {
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
+
+                    echo "=== Container Scan — Trivy ==="
+
+                    IMAGE="localhost:5000/taskflow-api:${SHORT_SHA}"
+                    TRIVY_IMAGE="aquasec/trivy:0.74.0"
+
+                    echo "Scan image: ${IMAGE}"
+                    echo "Trivy:      ${TRIVY_IMAGE}"
+
+                    # Same 7-char SHA as the Build Image stage.
+                    echo "${SHORT_SHA}" | grep -Eq '^[0-9a-f]{7}$'
+
+                    # 1. Human-readable table scan for the console log.
+                    #    Exit code 0: informational only, never blocks.
+                    echo "=== Trivy table scan (HIGH,CRITICAL) ==="
+                    docker run --rm \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v trivy-cache:/root/.cache \
+                        "${TRIVY_IMAGE}" \
+                        image --scanners vuln --severity HIGH,CRITICAL \
+                            --no-progress --exit-code 0 "${IMAGE}" > trivy-table.log 2>&1
+                    cat trivy-table.log
+                    if grep -E '^Total:' trivy-table.log; then
+                        echo "(table summary above)"
+                    else
+                        echo "(no Total summary line in table output)"
+                    fi
+
+                    # 2. SARIF scan that blocks on HIGH/CRITICAL (exit 1).
+                    #    The report is copied out of the container BEFORE the
+                    #    stage exits, so the post-always archive always has the
+                    #    file even when the scan fails. Errors are never masked.
+                    echo "=== Trivy SARIF scan (HIGH,CRITICAL, exit-code 1) ==="
+                    SARIF_CTR="trivy-sarif-${BUILD_NUMBER:-$$}"
+                    docker create --name "${SARIF_CTR}" \
+                        -v /var/run/docker.sock:/var/run/docker.sock \
+                        -v trivy-cache:/root/.cache \
+                        "${TRIVY_IMAGE}" \
+                        image --scanners vuln --severity HIGH,CRITICAL \
+                            --no-progress --format sarif -o /tmp/trivy.sarif \
+                            --exit-code 1 "${IMAGE}" > /dev/null
+                    set +e
+                    docker start -a "${SARIF_CTR}" > trivy-scan.log 2>&1
+                    TRIVY_EXIT=$?
+                    set -e
+                    cat trivy-scan.log
+                    docker cp "${SARIF_CTR}:/tmp/trivy.sarif" ./trivy.sarif
+                    docker rm "${SARIF_CTR}" > /dev/null
+
+                    # 3. Summarize HIGH/CRITICAL counts from the SARIF report.
+                    echo "=== Trivy summary (from trivy.sarif) ==="
+                    node <<'NODE'
+const fs = require('fs');
+const sarif = JSON.parse(fs.readFileSync('trivy.sarif', 'utf8'));
+const run = (sarif.runs && sarif.runs[0]) || {};
+const rules = ((run.tool && run.tool.driver && run.tool.driver.rules) || []);
+const results = run.results || [];
+const SEVS = ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'UNKNOWN'];
+const sevOf = (ruleId) => {
+    const r = rules.find(x => x.id === ruleId) || {};
+    const p = r.properties || {};
+    const tags = (p.tags || []).map(x => String(x).toUpperCase());
+    const t = tags.find(x => SEVS.includes(x));
+    if (t) return t;
+    if (p.severity) return String(p.severity).toUpperCase();
+    return '';
+};
+let high = 0, crit = 0, other = 0;
+for (const res of results) {
+    const s = sevOf(res.ruleId);
+    if (s === 'CRITICAL') crit++;
+    else if (s === 'HIGH') high++;
+    else other++;
+}
+console.log('HIGH     = ' + high);
+console.log('CRITICAL = ' + crit);
+console.log('other    = ' + other);
+console.log('total    = ' + results.length);
+NODE
+
+                    # 4. Block the pipeline when Trivy found HIGH/CRITICAL.
+                    echo "Trivy exit code: ${TRIVY_EXIT}"
+                    if [ "${TRIVY_EXIT}" -ne 0 ]; then
+                        echo "Blocking: Trivy found HIGH/CRITICAL vulnerabilities."
+                        exit "${TRIVY_EXIT}"
+                    fi
+                    echo "Trivy passed: no HIGH/CRITICAL vulnerabilities."
+                '''
+            }
+        }
+
+        post {
+            always {
+                dir('mini-task-manager') {
+                    archiveArtifacts(
+                        artifacts: 'trivy.sarif',
+                        fingerprint: true,
+                        allowEmptyArchive: false
+                    )
+                }
+            }
+        }
+    }
+
+    stage('Install') {
+        agent {
+            label 'k8s-node'
+        }
+        steps {
+            // Fresh ephemeral pod: restore sources (no git client here).
+            unstash 'app-sources'
+            dir('mini-task-manager') {
+                container('node') {
+                    sh '''
+                        set -eu
+
+                        echo "=== Environment ==="
+                        node --version
+                        npm --version
+
+                        echo "=== Install Dependencies ==="
+                        npm ci
+                    '''
+                }
             }
         }
     }
 
     stage('Lint') {
+        agent {
+            label 'k8s-node'
+        }
         steps {
+            // Fresh ephemeral pod: restore sources and install locally.
+            unstash 'app-sources'
             dir('mini-task-manager') {
-                sh '''
-                    set -eu
+                container('node') {
+                    sh '''
+                        set -eu
 
-                    echo "=== ESLint ==="
-                    npm run lint
-                '''
+                        echo "=== Install Dependencies ==="
+                        npm ci
+
+                        echo "=== ESLint ==="
+                        npm run lint
+                    '''
+                }
             }
         }
     }
 
     stage('Unit Test') {
+        agent {
+            label 'k8s-node'
+        }
         steps {
+            // Fresh ephemeral pod: restore sources and install locally.
+            unstash 'app-sources'
             dir('mini-task-manager') {
-                sh '''
-                    set -eu
+                container('node') {
+                    sh '''
+                        set -eu
 
-                    echo "=== Unit Test + Coverage ==="
+                        echo "=== Install Dependencies ==="
+                        npm ci
 
-                    npm test -- --coverage
+                        echo "=== Unit Test + Coverage ==="
 
-                    echo "=== Unit Test Reports ==="
-                    ls -lh test-results/
-                    ls -lh coverage/
-                '''
+                        npm test -- --coverage
+
+                        echo "=== Unit Test Reports ==="
+                        ls -lh test-results/
+                        ls -lh coverage/
+                    '''
+                }
             }
+            // Share the coverage report with SonarQube Analysis, which
+            // runs on linux-build.
+            stash includes: 'mini-task-manager/coverage/lcov.info', name: 'sonar-coverage'
         }
 
         post {
@@ -174,6 +842,8 @@ stages {
 
     stage('SonarQube Analysis') {
         steps {
+            // Coverage is produced by Unit Test on the Kubernetes agent.
+            unstash 'sonar-coverage'
             dir('mini-task-manager') {
                 script {
                     def scannerHome = tool 'SonarScanner'
@@ -192,6 +862,468 @@ stages {
         steps {
             timeout(time: 5, unit: 'MINUTES') {
                 waitForQualityGate abortPipeline: true
+            }
+        }
+    }
+
+    stage('Terraform Plan') {
+        steps {
+            dir('infra/terraform') {
+                // State backend is LocalStack S3, reached with dummy
+                // credentials (LocalStack convention, not real secrets).
+                // The Docker provider itself needs no cloud credentials.
+                sh '''
+                    set -eu
+
+                    echo "=== Terraform Plan ==="
+
+                    TF_IMG="hashicorp/terraform:1.16.3"
+                    LS_IMG="localstack/localstack:3.8.1"
+                    BUCKET="taskflow-terraform-state"
+                    ENDPOINT="http://localstack:4566"
+
+                    # 1. Bootstrap/check the S3 backend bucket (idempotent).
+                    #    Credentials are injected from Jenkins (aws-lab08).
+                    if docker run --rm --network jenkins --entrypoint awslocal \
+                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=us-east-1 \
+                        "${LS_IMG}" --endpoint-url="${ENDPOINT}" s3 ls "s3://${BUCKET}" > /dev/null 2>&1; then
+                        echo "Backend bucket s3://${BUCKET} already exists."
+                    else
+                        echo "Creating backend bucket s3://${BUCKET}..."
+                        docker run --rm --network jenkins --entrypoint awslocal \
+                            -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=us-east-1 \
+                            "${LS_IMG}" --endpoint-url="${ENDPOINT}" s3 mb "s3://${BUCKET}"
+                    fi
+
+                    # 2. Long-lived Terraform container. Sources are copied in
+                    #    via the Docker CLI because the agent workspace is not
+                    #    visible on the daemon host (same pattern as the OPA
+                    #    and Trivy stages). Cleanup trap never masks errors:
+                    #    the exit status is already fixed when it runs.
+                    TF_CTR="tf-plan-${BUILD_NUMBER:-$$}"
+                    cleanup() {
+                        docker rm -f "${TF_CTR}" > /dev/null
+                    }
+                    trap cleanup EXIT
+                    # LocalStack dummy credentials ("test") for the Terraform
+                    # S3 backend chain; EC2 metadata lookup is disabled so
+                    # the SDK never leaves the lab network. Not real secrets.
+                    docker create --name "${TF_CTR}" --network jenkins -v /var/run/docker.sock:/var/run/docker.sock \
+                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
+                        -e AWS_DEFAULT_REGION=us-east-1 -e AWS_EC2_METADATA_DISABLED=true \
+                        --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
+                    docker start "${TF_CTR}" > /dev/null
+                    docker exec "${TF_CTR}" mkdir -p /work
+                    docker cp . "${TF_CTR}:/work/"
+
+                    # 3. Init (real S3 backend on LocalStack) and plan.
+                    #    No apply/destroy in this stage, ever.
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform init -input=false'
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform plan -input=false -out=tfplan'
+
+                    # 4. Bring the plan file back and prove it exists.
+                    docker cp "${TF_CTR}:/work/tfplan" ./tfplan
+                    test -f tfplan
+                    echo "=== tfplan verified ==="
+                    ls -lh tfplan
+                '''
+            }
+        }
+
+        post {
+            always {
+                archiveArtifacts(
+                    artifacts: 'infra/terraform/tfplan',
+                    fingerprint: true,
+                    allowEmptyArchive: false
+                )
+            }
+        }
+    }
+
+    stage('Approval') {
+        steps {
+            input message: '''Terraform Plan is ready for review.
+
+Review before proceeding:
+- tfplan artifact: infra/terraform/tfplan (archived in this build)
+- Terraform Plan console output (init / plan summary)
+- S3 backend bucket: taskflow-terraform-state (LocalStack)
+
+Proceed continues to Terraform Apply (upcoming stage) and the
+downstream deployment stages. Abort stops the pipeline here;
+nothing is applied automatically.''', ok: 'Proceed'
+        }
+    }
+
+    stage('Terraform Apply') {
+        steps {
+            dir('infra/terraform') {
+                // Same LocalStack backend credentials as the Plan stage.
+                sh '''
+                    set -eu
+
+                    echo "=== Terraform Apply ==="
+
+                    TF_IMG="hashicorp/terraform:1.16.3"
+
+                    # The saved plan from the Terraform Plan stage in THIS
+                    # build (same node, same workspace). Fail fast if absent.
+                    test -f tfplan
+                    echo "Found saved plan:"
+                    ls -lh tfplan
+
+                    # Same container pattern as the Plan stage: sources plus
+                    # the saved plan are copied in via the Docker CLI, with
+                    # AWS credentials injected from Jenkins (aws-lab08).
+                    TF_CTR="tf-apply-${BUILD_NUMBER:-$$}"
+                    cleanup() {
+                        docker rm -f "${TF_CTR}" > /dev/null
+                    }
+                    trap cleanup EXIT
+                    docker create --name "${TF_CTR}" --network jenkins -v /var/run/docker.sock:/var/run/docker.sock \
+                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
+                        -e AWS_DEFAULT_REGION=us-east-1 -e AWS_EC2_METADATA_DISABLED=true \
+                        --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
+                    docker start "${TF_CTR}" > /dev/null
+                    docker exec "${TF_CTR}" mkdir -p /work
+                    docker cp . "${TF_CTR}:/work/"
+
+                    # Re-init (same S3 backend on LocalStack), then apply ONLY
+                    # the approved saved plan. No auto-approval flag: the
+                    # manual Approval stage already gated this step.
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform init -input=false'
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform apply -input=false tfplan'
+
+                    echo "=== Terraform Apply finished ==="
+                '''
+            }
+        }
+    }
+
+    stage('Ansible Configure') {
+        steps {
+            dir('infra') {
+                // The SSH private key (SSH Username with private key
+                // credential id 'taskflow-ssh-key-file', username ubuntu)
+                // is materialized as a workspace temp file. Nothing secret
+                // is written in this file.
+                withCredentials([
+                sshUserPrivateKey(
+                    credentialsId: 'taskflow-ssh-key-file',
+                    keyFileVariable: 'SSH_KEY_FILE',
+                    usernameVariable: 'SSH_USERNAME'
+                )]) {
+                sh '''
+                    set -eu
+
+                    echo "=== Ansible Configure ==="
+
+                    TF_IMG="hashicorp/terraform:1.16.3"
+                    ANS_IMG="willhallonline/ansible:2.20.9-debian-trixie-slim"
+
+                    # 1. Read the SSH target from Terraform outputs.
+                    #    State lives in the LocalStack S3 backend (dummy
+                    #    credentials, LocalStack convention).
+                    TF_CTR="tf-out-${BUILD_NUMBER:-$$}"
+                    ANS_CTR="ansible-run-${BUILD_NUMBER:-$$}"
+                    cleanup() {
+                        docker rm -f "${TF_CTR}" "${ANS_CTR}" > /dev/null
+                        rm -f ansible-inventory.ini taskflow-image.tar
+                    }
+                    trap cleanup EXIT
+                    docker create --name "${TF_CTR}" --network jenkins -v /var/run/docker.sock:/var/run/docker.sock \
+                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
+                        -e AWS_DEFAULT_REGION=us-east-1 -e AWS_EC2_METADATA_DISABLED=true \
+                        --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
+                    docker start "${TF_CTR}" > /dev/null
+                    docker exec "${TF_CTR}" mkdir -p /work
+                    docker cp terraform/. "${TF_CTR}:/work/"
+                    INSTANCE_IP="$(docker exec "${TF_CTR}" sh -c 'cd /work && terraform init -input=false > /dev/null && terraform output -raw ssh_target')"
+
+                    # The target must be non-empty: fail loudly otherwise.
+                    if [ -z "${INSTANCE_IP}" ]; then
+                        echo "BLOCKER: Terraform output ssh_target is empty - no provisioned host for Ansible."
+                        exit 1
+                    fi
+                    echo "SSH target from Terraform: ${INSTANCE_IP}"
+
+                    # 2. Dynamic inventory from Terraform output (workspace
+                    #    temp file, removed by the trap). No hard-coded IPs,
+                    #    no passwords, no private keys in the repository.
+                    printf '[taskflow]\n%s ansible_user=%s\n' "${INSTANCE_IP}" "${SSH_USERNAME}" > ansible-inventory.ini
+
+                    # 3. Preload the immutable lab image as a tarball into the
+                    #    target (the target has no Docker CLI yet; the
+                    #    playbook loads it via the Docker API after dockerd
+                    #    is up). Same kind-load idea, daemon-side only.
+                    docker save "taskflow-api:${SHORT_SHA}" -o taskflow-image.tar
+                    docker cp taskflow-image.tar "${INSTANCE_IP}:/tmp/taskflow-image.tar"
+                    rm -f taskflow-image.tar
+
+                    # 4. Run the real playbook against the provisioned host,
+                    #    reached by container name over the lab network.
+                    #    The SSH private key comes from the Jenkins 'Secret
+                    #    file' credential (taskflow-ssh-key-file) and is
+                    #    copied into the container only; it never lives in
+                    #    the repository. Non-interactive host-key handling is
+                    #    standard CI practice for ephemeral lab hosts.
+                    # The Ansible image runs as a non-root user by default;
+                    # run as root so workspace setup (mkdir/cp) works. The
+                    # SSH target user is still ubuntu via the inventory.
+                    docker create --name "${ANS_CTR}" --network taskflow-lab08 -u root \
+                        -e ANSIBLE_HOST_KEY_CHECKING=false \
+                        --entrypoint sh "${ANS_IMG}" -c 'sleep 600' > /dev/null
+                    docker start "${ANS_CTR}" > /dev/null
+                    docker exec "${ANS_CTR}" mkdir -p /work
+                    docker cp ansible/. "${ANS_CTR}:/work/ansible/"
+                    docker cp ansible-inventory.ini "${ANS_CTR}:/work/ansible-inventory.ini"
+                    # Wait for SSH to accept connections: a fresh container
+                    # bootstraps sshd via apt, which takes a minute or more.
+                    # The target host travels as argv (quoting-safe); fail
+                    # loudly on timeout.
+                    docker exec "${ANS_CTR}" sh -c 'python3 -c "import socket,sys,time
+host=sys.argv[1]
+deadline=time.time()+180
+ok=0
+while time.time()<deadline and not ok:
+    s=socket.socket()
+    s.settimeout(5)
+    try:
+        if s.connect_ex((host,22))==0:
+            ok=1
+    except OSError:
+        pass
+    s.close()
+    if not ok:
+        time.sleep(5)
+if ok:
+    print('"'"'SSH reachable'"'"')
+else:
+    print('"'"'ERROR: SSH never became reachable'"'"')
+sys.exit(0 if ok else 1)
+" '"${INSTANCE_IP}"''
+                    docker cp "${SSH_KEY_FILE}" "${ANS_CTR}:/tmp/ssh_key"
+                    docker exec "${ANS_CTR}" chmod 600 /tmp/ssh_key
+                    # Log only the key fingerprint (never the key itself) so
+                    # a mismatched credential is diagnosable from the console.
+                    if docker exec "${ANS_CTR}" ssh-keygen -lf /tmp/ssh_key; then
+                        echo "SSH key fingerprint readable."
+                    else
+                        echo "WARNING: cannot read SSH key fingerprint; check the taskflow-ssh-key-file credential content."
+                    fi
+                    docker exec "${ANS_CTR}" sh -c 'cd /work && ansible-playbook -i ansible-inventory.ini ansible/playbook.yml -e target_hosts=taskflow -e taskflow_image_tag='"${SHORT_SHA}"' -e ansible_user='"${SSH_USERNAME}"' -e ansible_ssh_private_key_file=/tmp/ssh_key'
+
+                    echo "=== Ansible Configure finished ==="
+                '''
+                }
+            }
+        }
+    }
+
+    stage('Blue/Green Deploy') {
+        steps {
+            dir('mini-task-manager') {
+                withCredentials([file(credentialsId: 'kind-taskflow-kubeconfig', variable: 'KUBECONFIG_FILE')]) {
+                sh '''
+                    set -eu
+
+                    echo "=== Blue/Green Deploy ==="
+
+                    KUBECTL_IMG="rancher/kubectl:v1.34.9"
+                    # Volume source is resolved by the Docker daemon, so this
+                    # Lab 10: kubeconfig from Jenkins secret file 'kind-taskflow-kubeconfig'
+                    # (bound to $KUBECONFIG_FILE; workspace files are not
+                    # daemon-visible, so each call uses create/cp/start/rm).
+                    # Never from Git.
+
+                    echo "${SHORT_SHA}" | grep -Eq '^[0-9a-f]{7}$'
+                    IMAGE="taskflow-api:${SHORT_SHA}"
+                    echo "Image: ${IMAGE}"
+
+                    rm -f .bg-current .bg-next
+
+                    kc() {
+                        KC_CALL="kc-call-$$-$(date +%s%N)"
+                        docker create --name "$KC_CALL" --network kind --user 0:0 \
+                            -e KUBECONFIG=/kubeconfig \
+                            --entrypoint kubectl \
+                            "${KUBECTL_IMG}" --context kind-taskflow "$@" > /dev/null
+                        docker cp "$KUBECONFIG_FILE" "$KC_CALL:/kubeconfig"
+                        docker start -a "$KC_CALL"
+                        KC_RC=$?
+                        docker rm -f "$KC_CALL" > /dev/null
+                        return "$KC_RC"
+                    }
+
+                    # 1-2. Current color, must be exactly blue or green.
+                    CURRENT="$(kc get svc taskflow -o "jsonpath={.spec.selector.color}")"
+                    echo "Current color: ${CURRENT}"
+                    if [ "${CURRENT}" != "blue" ] && [ "${CURRENT}" != "green" ]; then
+                        echo "ERROR: unexpected service color '${CURRENT}' (must be blue or green)"
+                        exit 1
+                    fi
+
+                    # 3. Next color via explicit equality check.
+                    if [ "${CURRENT}" = "blue" ]; then
+                        NEXT="green"
+                    else
+                        NEXT="blue"
+                    fi
+                    echo "Next color: ${NEXT}"
+
+                    # 4. Persist colors for the post-failure rollback block.
+                    echo "${CURRENT}" > .bg-current
+                    echo "${NEXT}" > .bg-next
+
+                    # 5. Load the SHA image into Kind. The agent has no kind
+                    #    binary, so replicate `kind load docker-image` with the
+                    #    existing Docker access: save the image and import it
+                    #    into the Kind node containerd (namespace k8s.io).
+                    echo "Loading ${IMAGE} into Kind..."
+                    docker save "${IMAGE}" | docker exec -i taskflow-control-plane ctr --namespace k8s.io images import -
+
+                    # 6-7. Roll out ONLY the inactive deployment, then wait.
+                    echo "Rolling out taskflow-${NEXT} with ${IMAGE}..."
+                    kc set image "deployment/taskflow-${NEXT}" "app=${IMAGE}"
+                    kc rollout status "deployment/taskflow-${NEXT}" --timeout=120s
+
+                    # 8. Verify two Ready pods with correct labels and image.
+                    READY="$(kc get "deployment/taskflow-${NEXT}" -o "jsonpath={.status.readyReplicas}")"
+                    if [ "${READY}" != "2" ]; then
+                        echo "ERROR: expected 2 readyReplicas on taskflow-${NEXT}, got '${READY}'"
+                        exit 1
+                    fi
+                    kc wait --for=condition=Ready -l "app=taskflow,color=${NEXT}" pod --timeout=60s
+                    PODS="$(kc get pods -l "app=taskflow,color=${NEXT}" -o "jsonpath={.items[*].metadata.name}")"
+                    COUNT=0
+                    for POD in ${PODS}; do
+                        COUNT=$((COUNT + 1))
+                        POD_IMAGE="$(kc get "pod/${POD}" -o "jsonpath={.spec.containers[0].image}")"
+                        if [ "${POD_IMAGE}" != "${IMAGE}" ]; then
+                            echo "ERROR: pod ${POD} uses image '${POD_IMAGE}', expected '${IMAGE}'"
+                            exit 1
+                        fi
+                        echo "Verified ${POD} (image ${POD_IMAGE}, Ready)"
+                    done
+                    if [ "${COUNT}" != "2" ]; then
+                        echo "ERROR: expected 2 taskflow-${NEXT} pods, found ${COUNT}"
+                        exit 1
+                    fi
+
+                    # 9. Smoke test the NEW pods directly (service still points
+                    #    to the old color). Fails the stage on bad response.
+                    for POD in ${PODS}; do
+                        echo "Smoke testing ${POD}..."
+                        BODY="$(kc exec "${POD}" -- wget -q -O - "http://127.0.0.1:8080/api/health")"
+                        echo "${POD}: ${BODY}"
+                        echo "${BODY}" | grep -q '"status":"ok"'
+                    done
+                    echo "Smoke test: 2/2 new pods healthy"
+
+                    # 10. Switch the service to the new color (app stays).
+                    kc patch svc taskflow -p '{"spec":{"selector":{"app":"taskflow","color":"'"${NEXT}"'"}}}'
+
+                    # 11-12. Verify selector and that endpoints are new pods.
+                    FINAL_COLOR="$(kc get svc taskflow -o "jsonpath={.spec.selector.color}")"
+                    if [ "${FINAL_COLOR}" != "${NEXT}" ]; then
+                        echo "ERROR: service color is '${FINAL_COLOR}', expected '${NEXT}'"
+                        exit 1
+                    fi
+                    NEXT_IPS="$(kc get pods -l "app=taskflow,color=${NEXT}" -o "jsonpath={.items[*].status.podIP}")"
+                    EPS="$(kc get endpoints taskflow -o "jsonpath={.subsets[*].addresses[*].ip}")"
+                    if [ -z "${EPS}" ]; then
+                        echo "ERROR: service taskflow has no endpoints"
+                        exit 1
+                    fi
+                    for IP in ${EPS}; do
+                        case " ${NEXT_IPS} " in
+                            *" ${IP} "*) echo "Endpoint ${IP} is a ${NEXT} pod" ;;
+                            *) echo "ERROR: endpoint ${IP} is not a ${NEXT} pod"; exit 1 ;;
+                        esac
+                    done
+
+                    # 13. Summary.
+                    echo "=== Blue/Green summary ==="
+                    echo "current color : ${CURRENT}"
+                    echo "next color    : ${NEXT}"
+                    echo "image         : ${IMAGE}"
+                    echo "rollout       : OK"
+                    echo "smoke test    : OK (2/2 pods)"
+                    echo "service color : ${FINAL_COLOR}"
+
+                    rm -f .bg-current .bg-next
+                '''
+                }
+                script {
+                    if (fileExists('.bg-current')) {
+                        env.BG_CURRENT = readFile('.bg-current').trim()
+                    }
+                    if (fileExists('.bg-next')) {
+                        env.BG_NEXT = readFile('.bg-next').trim()
+                    }
+                }
+            }
+        }
+
+        post {
+            failure {
+                dir('mini-task-manager') {
+                    withCredentials([file(credentialsId: 'kind-taskflow-kubeconfig', variable: 'KUBECONFIG_FILE')]) {
+                    sh '''
+                        set -eu
+                        echo "=== Blue/Green Rollback ==="
+                        # Read state from the workspace file directly: env set
+                        # by later steps is empty when the main sh failed, but
+                        # this file persists (it is removed only on success).
+                        BG_CURRENT=""
+                        if [ -f .bg-current ]; then
+                            BG_CURRENT="$(cat .bg-current)"
+                        fi
+                        if [ "${BG_CURRENT}" != "blue" ] && [ "${BG_CURRENT}" != "green" ]; then
+                            echo "No valid color state recorded (failure before color detection). Nothing to roll back."
+                            exit 0
+                        fi
+                        KUBECTL_IMG="rancher/kubectl:v1.34.9"
+                        # Same Jenkins-managed kubeconfig as the main block.
+                        kc() {
+                            KC_CALL="kc-rb-$$-$(date +%s%N)"
+                            docker create --name "$KC_CALL" --network kind --user 0:0 \
+                                -e KUBECONFIG=/kubeconfig \
+                                --entrypoint kubectl \
+                                "${KUBECTL_IMG}" --context kind-taskflow "$@" > /dev/null
+                            docker cp "$KUBECONFIG_FILE" "$KC_CALL:/kubeconfig"
+                            docker start -a "$KC_CALL"
+                            KC_RC=$?
+                            docker rm -f "$KC_CALL" > /dev/null
+                            return "$KC_RC"
+                        }
+                        LIVE="$(kc get svc taskflow -o "jsonpath={.spec.selector.color}")"
+                        if [ "${LIVE}" = "${BG_CURRENT}" ]; then
+                            echo "ROLLBACK: service already on ${BG_CURRENT}, traffic never left. No switch needed."
+                        else
+                            kc patch svc taskflow -p '{"spec":{"selector":{"app":"taskflow","color":"'"${BG_CURRENT}"'"}}}'
+                            echo "ROLLBACK: switched traffic back to ${BG_CURRENT}"
+                        fi
+                        echo "=== Rollback verification ==="
+                        sleep 10
+                        RB_COLOR="$(kc get svc taskflow -o "jsonpath={.spec.selector.color}")"
+                        if [ "${RB_COLOR}" != "${BG_CURRENT}" ]; then
+                            echo "ERROR: rollback verification FAILED, service color is '${RB_COLOR}', expected '${BG_CURRENT}'"
+                            exit 1
+                        fi
+                        RB_IPS="$(kc get pods -l "app=taskflow,color=${BG_CURRENT}" -o "jsonpath={.items[*].status.podIP}")"
+                        RB_EPS="$(kc get endpoints taskflow -o "jsonpath={.subsets[*].addresses[*].ip}")"
+                        for IP in ${RB_EPS}; do
+                            case " ${RB_IPS} " in
+                                *" ${IP} "*) echo "Endpoint ${IP} is a ${BG_CURRENT} pod" ;;
+                                *) echo "ERROR: endpoint ${IP} is not a ${BG_CURRENT} pod"; exit 1 ;;
+                            esac
+                        done
+                        echo "ROLLBACK_VERIFIED: service on ${BG_CURRENT} with correct endpoints"
+                    '''
+                    }
+                }
             }
         }
     }
@@ -284,6 +1416,60 @@ stages {
         }
     }
 
+    stage('Pipeline Health Gate') {
+        steps {
+            dir('mini-task-manager') {
+                sh '''
+                    set -eu
+
+                    echo "=== Pipeline Health Gate ==="
+                    echo "Rule: rolling success rate over the last 20 completed"
+                    echo "builds of THIS job/branch must be >= 90%."
+
+                    # 1. Lab 09 Prometheus endpoint (requirement compliance).
+                    #    Warn-only: monitoring must not brick deployments.
+                    PROM_URL="http://prometheus:9090"
+                    if curl -s -m 10 "${PROM_URL}/api/v1/query?query=up" | grep -q '"status":"success"'; then
+                        echo "Prometheus endpoint reachable: ${PROM_URL}"
+                    else
+                        echo "WARNING: Prometheus endpoint not reachable; continuing with Jenkins history only."
+                    fi
+
+                    # 2. Jenkins history for THIS multibranch job/branch only.
+                    #    Anonymous read is sufficient on this controller; no
+                    #    credentials or tokens are used or logged.
+                    API_JOB_PATH="$(echo "${JOB_NAME}" | sed 's|/|/job/|g')"
+                    HISTORY_URL="${JENKINS_URL}job/${API_JOB_PATH}/api/json?tree=builds[number,result]{0,21}"
+                    echo "History source: ${HISTORY_URL}"
+                    curl -s -m 20 "${HISTORY_URL}" > health-history.json
+                    test -s health-history.json
+
+                    node <<'NODE'
+const fs = require('fs');
+const data = JSON.parse(fs.readFileSync('health-history.json', 'utf8'));
+const current = parseInt(process.env.BUILD_NUMBER, 10);
+const done = (data.builds || []).filter(b => b.result !== null && b.number !== current).slice(0, 20);
+if (done.length === 0) {
+  console.log('WARNING: no completed prior builds; nothing to judge. Gate passes open.');
+  process.exit(0);
+}
+const ok = done.filter(b => b.result === 'SUCCESS').length;
+const rate = (100.0 * ok) / done.length;
+console.log('considered builds : ' + done.length);
+console.log('successful        : ' + ok);
+console.log('success rate      : ' + rate.toFixed(1) + '% (required >= 90%)');
+if (rate < 90) {
+  console.error('BLOCKED: rolling success rate below 90%. Aborting before production deploy.');
+  process.exit(1);
+}
+console.log('Health Gate passed.');
+NODE
+                    rm -f health-history.json
+                '''
+            }
+        }
+    }
+
     stage('Deploy — Production') {
         when {
             branch 'main'
@@ -294,6 +1480,105 @@ stages {
 
             echo '=== Deploy — Production ==='
             echo 'Production deployment simulated for Lab 05.'
+        }
+    }
+
+    stage('Terraform Destroy') {
+        when {
+            expression { return params.LAB08_DESTROY == true }
+        }
+        steps {
+            dir('infra/terraform') {
+                sh '''
+                    set -eu
+
+                    echo "=== Terraform Destroy (Lab 08 evidence cleanup) ==="
+
+                    TF_IMG="hashicorp/terraform:1.16.3"
+
+                    # Same container pattern as Plan/Apply: LocalStack dummy
+                    # credentials (not real secrets) for the S3 backend.
+                    TF_CTR="tf-destroy-${BUILD_NUMBER:-$$}"
+                    cleanup() {
+                        docker rm -f "${TF_CTR}" > /dev/null
+                    }
+                    trap cleanup EXIT
+                    docker create --name "${TF_CTR}" --network jenkins -v /var/run/docker.sock:/var/run/docker.sock \
+                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
+                        -e AWS_DEFAULT_REGION=us-east-1 -e AWS_EC2_METADATA_DISABLED=true \
+                        --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
+                    docker start "${TF_CTR}" > /dev/null
+                    docker exec "${TF_CTR}" mkdir -p /work
+                    docker cp . "${TF_CTR}:/work/"
+
+                    # Init against the existing remote backend, plan the full
+                    # destroy, show it, then apply that exact plan. No
+                    # -auto-approve: this stage runs only when a human sets
+                    # LAB08_DESTROY=true. Never deletes the state bucket.
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform init -input=false'
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform plan -destroy -input=false -out=tfplan-destroy'
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform apply -input=false tfplan-destroy'
+
+                    echo "=== Terraform Destroy finished ==="
+                '''
+            }
+        }
+    }
+
+    stage('Terraform State Verify') {
+        when {
+            expression { return params.LAB08_DESTROY == true }
+        }
+        steps {
+            dir('infra/terraform') {
+                sh '''
+                    set -eu
+
+                    echo "=== Terraform State Verify ==="
+
+                    TF_IMG="hashicorp/terraform:1.16.3"
+                    LS_IMG="localstack/localstack:3.8.1"
+                    BUCKET="taskflow-terraform-state"
+                    KEY="lab08/terraform.tfstate"
+                    ENDPOINT="http://localstack:4566"
+
+                    TF_CTR="tf-state-${BUILD_NUMBER:-$$}"
+                    cleanup() {
+                        docker rm -f "${TF_CTR}" > /dev/null
+                    }
+                    trap cleanup EXIT
+                    docker create --name "${TF_CTR}" --network jenkins -v /var/run/docker.sock:/var/run/docker.sock \
+                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test \
+                        -e AWS_DEFAULT_REGION=us-east-1 -e AWS_EC2_METADATA_DISABLED=true \
+                        --entrypoint sh "${TF_IMG}" -c 'sleep 600' > /dev/null
+                    docker start "${TF_CTR}" > /dev/null
+                    docker exec "${TF_CTR}" mkdir -p /work
+                    docker cp . "${TF_CTR}:/work/"
+                    docker exec "${TF_CTR}" sh -c 'cd /work && terraform init -input=false > /dev/null'
+
+                    # State must list zero managed resources after Destroy.
+                    RESOURCES="$(docker exec "${TF_CTR}" sh -c 'cd /work && terraform state list')"
+                    if [ -n "${RESOURCES}" ]; then
+                        echo "ERROR: managed resources remain in state:"
+                        echo "${RESOURCES}"
+                        exit 1
+                    fi
+                    echo "State resources: 0"
+
+                    # The remote state object itself must still exist: only
+                    # managed resources are destroyed, never the bucket.
+                    if docker run --rm --network jenkins --entrypoint awslocal \
+                        -e AWS_ACCESS_KEY_ID=test -e AWS_SECRET_ACCESS_KEY=test -e AWS_DEFAULT_REGION=us-east-1 \
+                        "${LS_IMG}" --endpoint-url="${ENDPOINT}" s3 ls "s3://${BUCKET}/${KEY}" > /dev/null 2>&1; then
+                        echo "Remote state object: PRESENT (s3://${BUCKET}/${KEY})"
+                    else
+                        echo "ERROR: remote state object s3://${BUCKET}/${KEY} is missing"
+                        exit 1
+                    fi
+
+                    echo "Terraform state verification: PASS"
+                '''
+            }
         }
     }
 
@@ -316,11 +1601,16 @@ post {
     }
 
     success {
-        echo 'PIPELINE PASSED'
+        echo "PIPELINE PASSED on ${env.BRANCH_NAME} (${env.BUILD_URL})"
+        // Lab 10 notification integration point (BLOCKED: no Slack/SMTP
+        // credential configured on the controller yet):
+        // slackSend(channel: '#taskflow', message: "PASS ${env.BRANCH_NAME} ${env.BUILD_URL}")
     }
 
     failure {
-        echo 'PIPELINE FAILED'
+        echo "PIPELINE FAILED on ${env.BRANCH_NAME} (${env.BUILD_URL})"
+        // Lab 10 notification integration point (BLOCKED: see above):
+        // slackSend(channel: '#taskflow', message: "FAIL ${env.BRANCH_NAME} ${env.BUILD_URL}")
     }
 }
 

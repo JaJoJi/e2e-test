@@ -1,0 +1,77 @@
+---
+- name: Prepare taskflow application host
+  hosts: "{{ target_hosts | default('taskflow_nodes') }}"
+  become: true
+  vars:
+    taskflow_image_repo: "taskflow-api"
+    # Immutable Lab 07 image tag. Never "latest".
+    taskflow_image_tag: "674a51a"
+    taskflow_host_port: 8080
+    taskflow_container_port: 8080
+    ansible_remote_user: "ubuntu"
+  tasks:
+    - name: Install Node.js runtime
+      ansible.builtin.apt:
+        name: nodejs
+        state: present
+        update_cache: true
+
+    - name: Install Docker engine
+      ansible.builtin.apt:
+        name: docker.io
+        state: present
+
+    - name: Install Python libraries required by Docker modules
+      ansible.builtin.apt:
+        name:
+          - python3-requests
+          - python3-docker
+        state: present
+
+    - name: Ensure Docker service is running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+      when: ansible_service_mgr == "systemd"
+
+    - name: Start Docker daemon directly on hosts without systemd
+      # vfs storage driver: nested overlay filesystems cannot apply
+      # whiteout layers, so the inner daemon must use vfs.
+      ansible.builtin.shell:
+        cmd: (dockerd -s vfs > /tmp/dockerd.log 2>&1 &)
+        creates: /var/run/docker.sock
+      when: ansible_service_mgr != "systemd"
+
+    - name: Wait for Docker daemon to accept commands
+      ansible.builtin.command: docker info
+      register: docker_info
+      until: docker_info.rc == 0
+      retries: 12
+      delay: 5
+      changed_when: false
+      when: ansible_service_mgr != "systemd"
+
+    - name: Load preloaded taskflow-api image into target Docker
+      # The tarball is placed at /tmp by the delivery pipeline (private
+      # lab images are not on Docker Hub). Loaded via the Docker API,
+      # so no Docker CLI is needed on the target.
+      community.docker.docker_image:
+        name: "{{ taskflow_image_repo }}:{{ taskflow_image_tag }}"
+        load_path: /tmp/taskflow-image.tar
+        source: load
+
+    - name: Run taskflow-api image with immutable tag
+      # pull: false because private lab images are preloaded into the
+      # target daemon by the delivery pipeline (same pattern as kind load);
+      # they do not exist on Docker Hub.
+      community.docker.docker_container:
+        name: taskflow-api
+        image: "{{ taskflow_image_repo }}:{{ taskflow_image_tag }}"
+        pull: false
+        state: started
+        restart_policy: unless-stopped
+        env:
+          PORT: "{{ taskflow_container_port | string }}"
+        ports:
+          - "{{ taskflow_host_port }}:{{ taskflow_container_port }}"

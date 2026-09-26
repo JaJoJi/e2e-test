@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: taskflow-green
+  labels:
+    app: taskflow
+    color: green
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: taskflow
+      color: green
+  template:
+    metadata:
+      labels:
+        app: taskflow
+        color: green
+    spec:
+      containers:
+        - name: app
+          image: taskflow-api:d5d5787
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
