@@ -1435,7 +1435,7 @@ sys.exit(0 if ok else 1)
                     # 1. Lab 09 Prometheus endpoint (requirement compliance).
                     #    Warn-only: monitoring must not brick deployments.
                     PROM_URL="http://prometheus:9090"
-                    if curl -s -m 10 "${PROM_URL}/api/v1/query?query=up" | grep -q '"status":"success"'; then
+                    if curl -s --globoff -m 10 "${PROM_URL}/api/v1/query?query=up" | grep -q '"status":"success"'; then
                         echo "Prometheus endpoint reachable: ${PROM_URL}"
                     else
                         echo "WARNING: Prometheus endpoint not reachable; continuing with Jenkins history only."
@@ -1451,8 +1451,26 @@ sys.exit(0 if ok else 1)
                     API_JOB_PATH="$(echo "${JOB_NAME}" | sed 's|/|/job/|g')"
                     HISTORY_URL="${JENKINS_AGENT_URL}job/${API_JOB_PATH}/api/json?tree=builds[number,result]{0,21}"
                     echo "History source: ${HISTORY_URL}"
-                    curl -s -m 20 "${HISTORY_URL}" > health-history.json
-                    test -s health-history.json
+                    # Retry transient controller read failures (empty/non-JSON
+                    # responses must not abort the gate before evaluation).
+                    # set -eu is neutralized inside the loop condition so a
+                    # failed attempt falls through to the next retry.
+                    FETCH_OK=0
+                    for ATTEMPT in 1 2 3; do
+                        if curl -s --globoff -m 20 "${HISTORY_URL}" > health-history.json \
+                            && [ -s health-history.json ] \
+                            && node -e "JSON.parse(require('fs').readFileSync('health-history.json','utf8'))" 2>/dev/null; then
+                            FETCH_OK=1
+                            echo "History fetched on attempt ${ATTEMPT}."
+                            break
+                        fi
+                        echo "WARNING: history fetch attempt ${ATTEMPT} failed; retrying in 5s..."
+                        sleep 5
+                    done
+                    if [ "${FETCH_OK}" != "1" ]; then
+                        echo "ERROR: Jenkins history unavailable after 3 attempts; cannot evaluate Health Gate."
+                        exit 1
+                    fi
 
                     node <<'NODE'
 const fs = require('fs');
