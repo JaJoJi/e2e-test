@@ -282,4 +282,32 @@ pipeline {
             }
         }
     }
+
+    // Lab 10 email notification via local MailHog sink (mailer SMTP host
+    // mailhog:1025, no auth). Includes branch, build number and build URL.
+    post {
+        success {
+            echo "MOBILE PIPELINE PASSED on ${env.BRANCH_NAME} (${env.BUILD_URL})"
+            emailext(
+                to: 'taskflow-lab@example.com',
+                subject: "Mobile Pipeline SUCCESS - ${env.BRANCH_NAME} #${env.BUILD_NUMBER}",
+                body: """Mobile Pipeline SUCCESS
+Branch: ${env.BRANCH_NAME}
+Build: #${env.BUILD_NUMBER}
+URL: ${env.BUILD_URL}"""
+            )
+        }
+
+        failure {
+            echo "MOBILE PIPELINE FAILED on ${env.BRANCH_NAME} (${env.BUILD_URL})"
+            emailext(
+                to: 'taskflow-lab@example.com',
+                subject: "Mobile Pipeline FAILURE - ${env.BRANCH_NAME} #${env.BUILD_NUMBER}",
+                body: """Mobile Pipeline FAILURE
+Branch: ${env.BRANCH_NAME}
+Build: #${env.BUILD_NUMBER}
+URL: ${env.BUILD_URL}"""
+            )
+        }
+    }
 }

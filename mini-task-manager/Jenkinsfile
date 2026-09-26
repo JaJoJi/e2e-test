@@ -1630,15 +1630,29 @@ post {
 
     success {
         echo "PIPELINE PASSED on ${env.BRANCH_NAME} (${env.BUILD_URL})"
-        // Lab 10 notification integration point (BLOCKED: no Slack/SMTP
-        // credential configured on the controller yet):
-        // slackSend(channel: '#taskflow', message: "PASS ${env.BRANCH_NAME} ${env.BUILD_URL}")
+        // Lab 10 email notification via local MailHog sink (mailer SMTP
+        // host mailhog:1025, no auth). Slack integration point retired.
+        emailext(
+            to: 'taskflow-lab@example.com',
+            subject: "Backend Pipeline SUCCESS - ${env.BRANCH_NAME} #${env.BUILD_NUMBER}",
+            body: """Backend Pipeline SUCCESS
+Branch: ${env.BRANCH_NAME}
+Build: #${env.BUILD_NUMBER}
+URL: ${env.BUILD_URL}"""
+        )
     }
 
     failure {
         echo "PIPELINE FAILED on ${env.BRANCH_NAME} (${env.BUILD_URL})"
-        // Lab 10 notification integration point (BLOCKED: see above):
-        // slackSend(channel: '#taskflow', message: "FAIL ${env.BRANCH_NAME} ${env.BUILD_URL}")
+        // Lab 10 email notification via local MailHog sink (see above).
+        emailext(
+            to: 'taskflow-lab@example.com',
+            subject: "Backend Pipeline FAILURE - ${env.BRANCH_NAME} #${env.BUILD_NUMBER}",
+            body: """Backend Pipeline FAILURE
+Branch: ${env.BRANCH_NAME}
+Build: #${env.BUILD_NUMBER}
+URL: ${env.BUILD_URL}"""
+        )
     }
 }
 
