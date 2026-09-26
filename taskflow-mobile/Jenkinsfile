@@ -150,8 +150,8 @@ pipeline {
                                 sh '''
                                     set -eu
                                     test -f pubspec.lock
-                                    osv-scanner scan source --lockfile pubspec.lock --format table
-                                    osv-scanner scan source --lockfile pubspec.lock --format sarif --output-file osv.sarif
+                                    /osv-scanner scan source --lockfile pubspec.lock --format table
+                                    /osv-scanner scan source --lockfile pubspec.lock --format sarif --output-file osv.sarif
                                     test -s osv.sarif
                                 '''
                             }
