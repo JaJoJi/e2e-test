@@ -1,0 +1,278 @@
+// taskflow-mobile Jenkinsfile (Lab 10).
+//
+// Multibranch script path: taskflow-mobile/Jenkinsfile
+// Runs exclusively on Lab 09 Kubernetes dynamic agents (no static agents).
+// Pod containers are added on top of the existing 'k8s-node' template via
+// inheritFrom + merge, so the stored Jenkins pod template is never modified.
+//
+// Stages:
+//   Checkout -> parallel(Analyze, Test+Coverage, OSV SCA) -> Debug APK (all
+//   branches) -> Signed Release AAB (main only, Jenkins-managed signing).
+
+// Extra pod containers merged into the inherited 'k8s-node' template.
+// The parent template already provides the JNLP agent, the workspace volume
+// ('workspace-volume' at /home/jenkins/agent) and the 'node' container; we
+// only ADD the tool containers and mount the same workspace volume.
+def MOBILE_POD_YAML = '''
+apiVersion: v1
+kind: Pod
+metadata:
+  labels:
+    app: taskflow-mobile
+spec:
+  containers:
+  - name: flutter
+    image: ghcr.io/cirruslabs/flutter:stable
+    command: [cat]
+    tty: true
+    resources:
+      requests:
+        memory: "2Gi"
+        cpu: "1"
+      limits:
+        memory: "8Gi"
+        cpu: "4"
+    volumeMounts:
+    - name: workspace-volume
+      mountPath: /home/jenkins/agent
+  - name: osv
+    image: ghcr.io/google/osv-scanner:latest
+    command: [cat]
+    tty: true
+    volumeMounts:
+    - name: workspace-volume
+      mountPath: /home/jenkins/agent
+'''
+
+pipeline {
+    agent none
+
+    options {
+        timestamps()
+        timeout(time: 45, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    stages {
+        stage('Checkout') {
+            agent {
+                kubernetes {
+                    inheritFrom 'k8s-node'
+                    yamlMergeStrategy merge()
+                    yaml MOBILE_POD_YAML
+                    defaultContainer 'flutter'
+                }
+            }
+            steps {
+                checkout scm
+                sh '''
+                    set -eu
+                    flutter --version
+                    test -f taskflow-mobile/pubspec.yaml
+                '''
+            }
+        }
+
+        stage('Quality Gates') {
+            parallel {
+                stage('Flutter Analyze') {
+                    agent {
+                        kubernetes {
+                            inheritFrom 'k8s-node'
+                            yamlMergeStrategy merge()
+                            yaml MOBILE_POD_YAML
+                            defaultContainer 'flutter'
+                        }
+                    }
+                    steps {
+                        checkout scm
+                        dir('taskflow-mobile') {
+                            sh '''
+                                set -eu
+                                flutter pub get
+                                flutter analyze
+                            '''
+                        }
+                    }
+                }
+
+                stage('Flutter Test + Coverage') {
+                    agent {
+                        kubernetes {
+                            inheritFrom 'k8s-node'
+                            yamlMergeStrategy merge()
+                            yaml MOBILE_POD_YAML
+                            defaultContainer 'flutter'
+                        }
+                    }
+                    steps {
+                        checkout scm
+                        dir('taskflow-mobile') {
+                            sh '''
+                                set -eu
+                                flutter pub get
+                                flutter test --coverage
+                                test -f coverage/lcov.info
+                            '''
+                        }
+                    }
+                    post {
+                        always {
+                            dir('taskflow-mobile') {
+                                archiveArtifacts(
+                                    artifacts: 'coverage/**',
+                                    fingerprint: true,
+                                    allowEmptyArchive: false
+                                )
+                            }
+                        }
+                    }
+                }
+
+                stage('OSV Scanner SCA') {
+                    agent {
+                        kubernetes {
+                            inheritFrom 'k8s-node'
+                            yamlMergeStrategy merge()
+                            yaml MOBILE_POD_YAML
+                            defaultContainer 'flutter'
+                        }
+                    }
+                    steps {
+                        // Sources are checked out with the flutter container
+                        // (it ships git); the scan itself runs in the osv
+                        // container on the shared workspace volume.
+                        container('flutter') {
+                            checkout scm
+                        }
+                        container('osv') {
+                            dir('taskflow-mobile') {
+                                sh '''
+                                    set -eu
+                                    test -f pubspec.lock
+                                    osv-scanner scan source --lockfile pubspec.lock --format table
+                                    osv-scanner scan source --lockfile pubspec.lock --format sarif --output-file osv.sarif
+                                    test -s osv.sarif
+                                '''
+                            }
+                        }
+                    }
+                    post {
+                        always {
+                            dir('taskflow-mobile') {
+                                archiveArtifacts(
+                                    artifacts: 'osv.sarif',
+                                    fingerprint: true,
+                                    allowEmptyArchive: false
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Debug APK') {
+            agent {
+                kubernetes {
+                    inheritFrom 'k8s-node'
+                    yamlMergeStrategy merge()
+                    yaml MOBILE_POD_YAML
+                    defaultContainer 'flutter'
+                }
+            }
+            steps {
+                checkout scm
+                dir('taskflow-mobile') {
+                    sh '''
+                        set -eu
+                        flutter pub get
+                        flutter build apk --debug
+                        test -f build/app/outputs/flutter-apk/app-debug.apk
+                    '''
+                }
+            }
+            post {
+                success {
+                    dir('taskflow-mobile') {
+                        archiveArtifacts(
+                            artifacts: 'build/app/outputs/flutter-apk/app-debug.apk',
+                            fingerprint: true,
+                            allowEmptyArchive: false
+                        )
+                    }
+                }
+            }
+        }
+
+        stage('Signed Release AAB') {
+            when {
+                branch 'main'
+            }
+            agent {
+                kubernetes {
+                    inheritFrom 'k8s-node'
+                    yamlMergeStrategy merge()
+                    yaml MOBILE_POD_YAML
+                    defaultContainer 'flutter'
+                }
+            }
+            steps {
+                checkout scm
+                // Release signing comes exclusively from Jenkins-managed
+                // credentials. The Gradle signing config reads the temporary
+                // android/key.properties (git-ignored); values are Jenkins-
+                // masked and the file is always removed afterwards.
+                withCredentials([
+                    file(
+                        credentialsId: 'taskflow-android-keystore',
+                        variable: 'ANDROID_KEYSTORE_FILE'
+                    ),
+                    string(
+                        credentialsId: 'taskflow-android-store-password',
+                        variable: 'ANDROID_STORE_PASSWORD'
+                    ),
+                    string(
+                        credentialsId: 'taskflow-android-key-alias',
+                        variable: 'ANDROID_KEY_ALIAS'
+                    ),
+                    string(
+                        credentialsId: 'taskflow-android-key-password',
+                        variable: 'ANDROID_KEY_PASSWORD'
+                    )
+                ]) {
+                    dir('taskflow-mobile') {
+                        sh '''
+                            set -eu
+                            printf 'storeFile=%s\\nstorePassword=%s\\nkeyAlias=%s\\nkeyPassword=%s\\n' \
+                                "$ANDROID_KEYSTORE_FILE" \
+                                "$ANDROID_STORE_PASSWORD" \
+                                "$ANDROID_KEY_ALIAS" \
+                                "$ANDROID_KEY_PASSWORD" \
+                                > android/key.properties
+                            flutter pub get
+                            flutter build appbundle --release
+                            test -f build/app/outputs/bundle/release/app-release.aab
+                        '''
+                    }
+                }
+            }
+            post {
+                always {
+                    dir('taskflow-mobile') {
+                        sh 'rm -f android/key.properties || true'
+                    }
+                }
+                success {
+                    dir('taskflow-mobile') {
+                        archiveArtifacts(
+                            artifacts: 'build/app/outputs/bundle/release/app-release.aab',
+                            fingerprint: true,
+                            allowEmptyArchive: false
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
