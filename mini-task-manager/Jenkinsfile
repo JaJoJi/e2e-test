@@ -37,6 +37,13 @@ stages {
     stage('Checkout') {
         steps {
             checkout scm
+            // Single pre-install for the parallel Quality Gates block below.
+            // Parallel branches must not run installers concurrently: they
+            // share this workspace while Docker-based branches stream it
+            // with `docker cp` (tar aborts on vanishing files).
+            dir('mini-task-manager') {
+                sh 'npm ci --no-audit --no-fund'
+            }
             // Share sources with Kubernetes-agent stages (their pods have
             // no git client). Never stash node_modules or build outputs.
             stash includes: 'mini-task-manager/**', excludes: 'mini-task-manager/node_modules/**, mini-task-manager/coverage/**, mini-task-manager/test-results/**, mini-task-manager/e2e/playwright-report/**, mini-task-manager/e2e/test-results/**', name: 'app-sources'
@@ -116,10 +123,9 @@ stages {
                         sh '''
                             set -eu
 
-                            echo "=== Install dependencies for SAST ==="
-                            npm ci --no-audit --no-fund
-
                             echo "=== ESLint Security Scan ==="
+                            # Dependencies are pre-installed once in Checkout
+                            # (parallel branches share this workspace).
 
                             npx eslint \
                                 --plugin security \
