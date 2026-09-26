@@ -283,7 +283,7 @@ stages {
         }
 
         console.log('SCA passed: 0 critical vulnerabilities');
-        NODE
+NODE
                         '''
                     }
                 }
